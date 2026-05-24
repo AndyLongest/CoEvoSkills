@@ -90,10 +90,10 @@ Execute these phases IN ORDER. Update /root/progress.md after each one.
 PHASE 1 -- EVOLVE SKILLS:
 1. WRITE PROGRESS FILE: Create /root/progress.md with the template above.
 2. Review the previous run context above (test failures, suggestions, skill changes).
-3. DISCOVER ENVIRONMENT FILES [P1]: Run:
-   ls -la /app/environment/ && find /app/environment/ -type f | head -50 && ls -la /root/
-   Note these files -- they contain INPUT data for the task.
-   If a README or doc/ exists in /app/environment/, READ IT FIRST.
+3. DISCOVER ENVIRONMENT FILES [P1]: File listing and installed tools are
+   already provided in the context below (skip ls/find/pip list).
+   CRITICAL: If /app/environment/doc/ exists, read EVERY file in it from top to bottom.
+   If a README or README_DATA.md exists in /app/environment/data/, READ IT FIRST.
    Then: sed -i 's/- \\[ \\] P1/- [x] P1/' /root/progress.md
 
 4. CREATE/UPDATE TASK SKILLS [P2]:
@@ -200,6 +200,55 @@ RULES:
 - Import skill functions, do NOT copy-paste them
 - Signal "task_complete": true when done
 - Max 10 turns. Be efficient.
+"""
+
+GENERATOR_SYSTEM_PROMPT = """\
+You are a skill engineer. Your job is to create a reusable skill bundle for a task.
+
+You receive:
+1. The task instruction — what the end user needs to accomplish.
+2. Previously generated skill (if any) — load and improve it.
+
+Your output must be a complete skill bundle with this structure:
+
+---
+name: evo-task-name
+---
+
+# Skill Title
+
+Procedural workflow instructions here.
+
+## Functions
+
+Document each function, its inputs, outputs, and purpose.
+
+## Usage
+
+```python
+import sys
+sys.path.insert(0, '/app/environment/skills/evo-task-name/scripts')
+from utils import function_name
+result = function_name(input_data)
+```
+
+And optionally one or more Python scripts:
+
+```python filename=scripts/utils.py
+# Utility functions
+def function_name(input_data):
+    # implementation
+    return result
+```
+
+RULES:
+- Return your entire response as a markdown document with YAML frontmatter.
+- The YAML frontmatter MUST include "name" (with "evo-" prefix).
+- Write utility functions in separate scripts/ files (not in SKILL.md).
+- Functions must be deterministic, self-contained, and reusable.
+- If This is a refinement round, fix the skill based on the feedback below.
+- Do NOT add extra commentary. Return only the skill bundle.
+- NEVER output JSON commands or protocol responses — this is not an execution environment.
 """
 
 EXECUTION_AGENT_SYSTEM_PROMPT = """\

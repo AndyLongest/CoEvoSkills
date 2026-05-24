@@ -50,6 +50,8 @@ def main():
     parser.add_argument("--output", default="./output", type=Path, help="Output directory")
     parser.add_argument("--benchmark", default="./skillsbench", type=Path, help="SkillsBench root")
     parser.add_argument("--parallel", default=None, type=int, help="Override parallel workers")
+    parser.add_argument("--n", default=None, type=int, help="Override evolution N (max oracle interventions)")
+    parser.add_argument("--m", default=None, type=int, help="Override evolution M (max surrogate retries)")
     args = parser.parse_args()
 
     logger = setup_logger("coevo-evolve")
@@ -59,6 +61,10 @@ def main():
 
     if args.model:
         config.llm_model = args.model
+    if args.n is not None:
+        config.evolution.n = args.n
+    if args.m is not None:
+        config.evolution.m = args.m
 
     output_dir = Path(args.output)
     store = ArtifactStore(output_dir)

@@ -79,8 +79,15 @@ class AgentLoop:
 
         parts: list[str] = []
 
+        parts.append(
+            "=== ENVIRONMENT (pre-discovered) ===\n"
+            "The file tree and tool list below are already confirmed. "
+            "Do NOT re-run ls/find/pip list. "
+            "If /app/environment/doc/ exists, you still need to READ those files."
+        )
+
         if env_files:
-            parts.append(f"=== Environment Files (already discovered) ===\n{env_files}")
+            parts.append(f"File tree:\n{env_files}")
 
         if installed_tools:
             parts.append(f"=== Installed Tools & Libraries ===\n{installed_tools}")
@@ -91,8 +98,9 @@ class AgentLoop:
         parts.append(f"Task Description:\n{instruction}")
 
         parts.append(
-            "\nNOTE: Environment discovery (P1/P1b) has already been completed. "
-            "The files and tools above have been verified. Start from P2 (create/update skill)."
+            "\nNOTE: Environment discovery (P1) has already been completed. "
+            "The file tree and tool list above are the confirmed environment state. "
+            "Do NOT run ls/find/pip list again. Start directly from P2 (create/update skill)."
         )
 
         content = "\n\n---\n\n".join(parts)
@@ -238,8 +246,6 @@ class AgentLoop:
                 continue
 
             logger.info("CMD: %s", keystrokes[:200].replace("\n", "\\n"))
-            cmd_preview = keystrokes[:200].replace("\n", "\\n")
-            print(f"    $ {cmd_preview}")
 
             parsed = self._parse_keystrokes(keystrokes)
             for pcmd, ptimeout in parsed:

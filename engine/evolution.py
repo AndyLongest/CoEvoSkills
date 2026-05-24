@@ -6,13 +6,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from layers.oracle.oracle import Oracle
+from layers.skill_generator.generator import SkillGenerator
 from layers.surrogate_verifier.verifier import SurrogateVerifier
 from repository.skill import SkillBundle, write_skill
 from repository.store import ArtifactStore
 from repository.task import Task
-from utils.agent.loop import AgentLoop
-from utils.agent.prompts import EVOLUTION_AGENT_SYSTEM_PROMPT
 from utils.config import Config
+from utils.executor.executor import Executor
 from utils.executor.sandbox import Sandbox
 from utils.llm.client import LLMClient
 
@@ -45,21 +45,21 @@ def run_evolution(
 ) -> tuple[SkillBundle | None, EvolutionMetrics]:
     """Algorithm 1: CoEvoSkills co-evolutionary loop.
 
-    Uses a unified AgentLoop with the paper's full EVOLUTION_AGENT_SYSTEM_PROMPT
-    (Appendix F.1) for both skill creation and execution in one continuous session.
-
+    Paper structure:
       C ← (I, S_meta)
-      S(0) ~ πθ(· | C)
+      S(0) ∼ πθ(·|C)                    Generator generates initial skill
       while n < N and r < M:
-        agent session: create/update skill → execute → produce outputs (P1-P6)
-        x(i) ← collect outputs from sandbox /root/
-        R̃(i,j) ← verifier.evaluate(I, x(i), V(j))
+        x(i) ← Φ(S(i), E)               Executor runs skill in sandbox
+        R̃(i,j) ← evaluate(x(i), V(j))   Surrogate verifier
         if R̃ < 1:
-          append feedback F to context
-          r++; continue   (agent refines skill and re-executes in same session)
-        oracle evaluates skill in fresh sandbox
-        if R=1: return S*
-        V(j+1) ← verifier escalates; j++
+          C ← C ⊕ F(i,j)
+          S(i+1) ∼ πθ(·|C)              Generator refines with feedback
+          r++; continue
+        x̂(i) ← Φ(S(i), E')              Fresh execution for oracle
+        R(i) ← oracle(x̂(i))              Ground-truth oracle
+        if R == 1: return S*
+        V(j+1) ← escalate(V)            Verifier escalates tests
+        n++
     """
     metrics = EvolutionMetrics(task_name=task.name)
     n = 0
@@ -76,15 +76,27 @@ def run_evolution(
     sandbox = Sandbox()
     sandbox.setup(install_deps=_extract_deps_from_task(task))
 
+    generator = SkillGenerator(client=client, meta_skill=meta_skill)
+    executor = Executor(client=client, max_turns=10, beta=config.evolution.beta)
+
     try:
-        # Prepare environment: copy task files into sandbox once
         task.environment.prepare_sandbox(sandbox)
 
-        # Collect environment info to inject into context (saves discovery turns)
-        env_files = _get_env_files_info(sandbox)
-        installed_tools = _get_installed_tools(sandbox)
+        # Build environment context for the Generator
+        env_context = _build_environment_context(task)
+        if env_context:
+            generator.init_context(task.instruction, env_context=env_context)
+            store.write_log(task.name, "Environment context injected into generator")
 
-        feedback_history: list[str] = []
+        # === 1. Generate initial skill S(0) ∼ πθ(·|C) ===
+        print("  GENERATOR | Generating initial skill...")
+        S = generator.generate(task.instruction)
+        if S is None:
+            S = SkillBundle(name=f"evo-{task.name}", skillell="# Initial skill\n")
+        S_best = S
+        store.write_log(task.name, f"Initial skill: {S.name}")
+        write_skill(S, skill_dir)
+        print(f"  GENERATOR | Skill '{S.name}' generated")
 
         while n < config.evolution.n and r < config.evolution.m:
             metrics.rounds += 1
@@ -92,56 +104,36 @@ def run_evolution(
             store.write_log(task.name, f"Round {metrics.rounds}: n={n}, r={r}")
             print(f"\n─── ROUND {metrics.rounds} ───  n={n}/{config.evolution.n} oracle  r={r}/{config.evolution.m} surrogate")
 
-            # === 1. Agent session: create/update skill → execute → outputs ===
-            store.write_log(task.name, "Phase: agent session (P1-P6)")
-            print("  GENERATOR | Agent session...")
-
-            # Create fresh agent each round — avoids context bloat across rounds
-            agent = AgentLoop(
-                client=client,
-                sandbox=sandbox,
-                system_prompt=EVOLUTION_AGENT_SYSTEM_PROMPT,
-                max_turns=20,
-                beta=config.evolution.beta,
-            )
-            if skill_loader:
-                agent.set_skill_loader(skill_loader)
-
-            # Initialize context with instruction + accumulated feedback
-            agent.init_context(task.instruction, meta_skill, env_files, installed_tools)
-            for fb in feedback_history:
-                agent.append(fb)
-
-            task_complete, _ = agent.run_loop(task.instruction)
-
-            outputs = _collect_outputs(sandbox)
+            # === 2. Execute skill in sandbox: x(i) ← Φ(S(i), E) ===
+            store.write_log(task.name, "Phase: executor")
+            print("  EXECUTOR  | Running skill...")
+            outputs = executor.execute(S, sandbox, task.instruction, skill_loader=skill_loader)
             round_record["output_count"] = len(outputs)
             store.write_log(task.name,
-                f"Agent session complete: task_complete={task_complete}, {len(outputs)} files: {list(outputs.keys())[:5]}")
-            print(f"  GENERATOR | task_complete={task_complete}, {len(outputs)} files: {list(outputs.keys())[:3]}")
+                f"Executor complete: {len(outputs)} files: {list(outputs.keys())[:5]}")
+            print(f"  EXECUTOR  | {len(outputs)} files produced")
 
-            # Try to read skill from sandbox
-            skill = _read_skill_from_sandbox(sandbox, task.name)
-            if skill is None:
-                # Fallback: create placeholder
-                skill = SkillBundle(name=f"evo-{task.name}", skillell="# Initial skill\n")
-            S_best = skill
-
-            # === 2. Surrogate Verifier evaluation ===
+            # === 3. Surrogate Verifier: R̃(i,j) ← evaluate(x(i), V(j)) ===
             store.write_log(task.name, "Phase: verifier")
             print(f"  VERIFIER  | Evaluating {len(outputs)} files with {len(V)} tests...")
-            r_tilde, feedback = verifier.evaluate(task.instruction, outputs, V)
+            r_tilde, feedback, V = verifier.evaluate(task.instruction, outputs, V)
             round_record["r_tilde"] = r_tilde
             store.write_log(task.name,
                 f"Surrogate R̃ = {r_tilde:.2f}, tests={len(V)}, outputs={len(outputs)}")
             print(f"  VERIFIER  | R̃ = {r_tilde:.2f}")
 
+            # === 4. If R̃ < 1: refine skill and retry ===
             if r_tilde < 1.0:
                 if feedback:
-                    feedback_history.append(feedback.to_context_str())
+                    generator.append_feedback(feedback.to_context_str())
                     store.write_log(task.name,
                         f"Verifier feedback: {feedback.root_cause_analysis[:100]}...")
-                    print(f"  VERIFIER  | Feedback → agent (surrogate retry {r}/{config.evolution.m})")
+                    print("  GENERATOR | Refining skill with feedback...")
+                    S = generator.generate(task.instruction, feedback=feedback.to_context_str())
+                    if S is None:
+                        S = SkillBundle(name=f"evo-{task.name}", skillell="# Fallback skill\n")
+                    S_best = S
+                    write_skill(S, skill_dir)
 
                 round_record["exit"] = "verifier_fail"
                 metrics.history.append(round_record)
@@ -149,10 +141,10 @@ def run_evolution(
                 metrics.surrogate_retries += 1
                 continue
 
-            # === 3. Ground-Truth Oracle (fresh sandbox) ===
+            # === 5. Ground-Truth Oracle: R(i) ← oracle(x̂(i)) ===
             store.write_log(task.name, "Phase: oracle")
             print("  ORACLE    | Running skill in fresh sandbox...")
-            oracle_r, oracle_score = oracle.evaluate(skill, task, client)
+            oracle_r, oracle_score = oracle.evaluate(S, task, client, deps=_extract_deps_from_task(task))
             n += 1
             metrics.oracle_calls += 1
             round_record["oracle_reward"] = oracle_r
@@ -160,7 +152,7 @@ def run_evolution(
             print(f"  ORACLE    | R = {oracle_r}")
 
             if oracle_r == 1:
-                S_best = skill
+                S_best = S
                 metrics.final_reward = 1.0
                 metrics.best_reward = 1.0
                 metrics.converged = True
@@ -173,14 +165,12 @@ def run_evolution(
                 break
             elif oracle_score > R_best:
                 R_best = oracle_score
-                S_best = skill
+                S_best = S
 
             metrics.best_reward = R_best
 
-            # === 4. Co-evolution: escalate verifier tests ===
-            feedback_history.append(
-                "Ground-truth oracle: TESTS FAILED. The verifier's tests were insufficient."
-            )
+            # === 6. Co-evolution: escalate verifier tests V(j+1) ===
+            generator.append_oracle_signal(False)
             V = verifier.escalate(task.instruction, outputs, V)
             round_record["exit"] = "oracle_fail_escalate"
             round_record["V_size"] = len(V)
@@ -190,6 +180,7 @@ def run_evolution(
     except Exception as e:
         metrics.error = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
         store.write_log(task.name, f"Error: {metrics.error}")
+        print(f"  ERROR: {metrics.error[:200]}")
     finally:
         sandbox.cleanup()
 
@@ -274,6 +265,54 @@ def _read_skill_from_sandbox(sandbox: Sandbox, task_name: str) -> SkillBundle | 
                     scripts[rel] = content
 
     return SkillBundle(name=skill_name, skillell=skillell, scripts=scripts)
+
+
+def _build_environment_context(task: Task) -> str:
+    """Build a dense summary of the task's environment files and context.
+
+    This is injected into the Skill Generator's context C so it can
+    produce skills tailored to the actual input data, available skills,
+    and installed dependencies — without needing an interactive agent loop.
+    """
+    parts: list[str] = []
+
+    env_dir = task.environment.root / "environment"
+    if env_dir.exists():
+        root_files = sorted(
+            f for f in env_dir.iterdir()
+            if f.is_file() and f.name != "Dockerfile"
+        )
+        for f in root_files:
+            try:
+                content = f.read_text()
+                parts.append(f"### Input file: {f.name}\n```\n{content[:5000]}\n```")
+            except UnicodeDecodeError:
+                parts.append(f"### Input file: {f.name}  [binary, skipped]")
+
+    if task.environment.data_files:
+        parts.append("### Data files in data/:")
+        for path, content in task.environment.data_files.items():
+            parts.append(f"**{path}**\n```\n{content[:3000]}\n```")
+
+    if task.environment.doc_files:
+        parts.append("### Reference documents:")
+        for path, content in task.environment.doc_files.items():
+            parts.append(f"**{path}**\n```\n{content[:3000]}\n```")
+
+    skill_mds = {
+        k: v for k, v in task.environment.pre_installed_skills.items()
+        if k.endswith("SKILL.md")
+    }
+    if skill_mds:
+        parts.append("### Pre-installed skills available:")
+        for path, content in skill_mds.items():
+            parts.append(f"**{path}**\n```\n{content[:2000]}\n```")
+
+    deps = _extract_deps_from_task(task)
+    if deps:
+        parts.append(f"### Installed Python packages: {', '.join(deps)}")
+
+    return "\n\n".join(parts)
 
 
 def _extract_deps_from_task(task: Task) -> list[str]:

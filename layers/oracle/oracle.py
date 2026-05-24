@@ -36,12 +36,13 @@ class Oracle:
         skill,
         task,
         client,
+        deps: list[str] | None = None,
         timeout: int = 3600,
     ) -> tuple[int, float]:
         from utils.executor.sandbox import Sandbox
 
         sandbox = Sandbox()
-        sandbox.setup()
+        sandbox.setup(install_deps=deps)
 
         try:
             env = task.environment

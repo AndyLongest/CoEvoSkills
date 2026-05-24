@@ -13,9 +13,13 @@ CoEvo/
 │   │   ├── openai.py               #     GPT adapter
 │   │   └── types.py                #     Message, Response types
 │   ├── executor/                   #   Code execution engine
-│   │   ├── sandbox.py              #     Sandboxed env (Docker)
-│   │   ├── environment.py          #     Env setup/teardown/rollout Φ(S,E)
+│   │   ├── sandbox.py              #     Sandboxed env (proot/bare/docker)
+│   │   ├── executor.py             #     Skill Executor Φ(S,E) (Algorithm 1)
+│   │   ├── environment.py          #     Env setup/teardown/rollout
 │   │   └── filesystem.py           #     File I/O inside container
+│   ├── agent/                      #   Agent interaction
+│   │   ├── loop.py                 #     JSON protocol agent loop
+│   │   └── prompts.py              #     All system prompts
 │   ├── config.py                   #   Global config loading
 │   └── logger.py                   #   Structured logging
 │
@@ -76,14 +80,12 @@ CoEvo/
 ```
 scripts/evolve.py
   └─→ engine/evolution.py (Algorithm 1)
-        ├─→ repository/task.py       (load task)
-        ├─→ engine/context.py        (init context C)
-        └─→ loop while n<N and r<M:
-              ├─→ layers/skill_generator/  → S(i)
-              ├─→ utils/executor/          → x(i) = Φ(S(i), E)
-              ├─→ layers/surrogate_verifier/ → R̃, F(i,j)
-              ├─→ layers/oracle/           → R (pass/fail)
-              └─→ layers/surrogate_verifier/ → V(j+1) (if R̃=1 ∧ R<1)
+        ├─→ repository/task.py        (load task)
+        ├─→ layers/skill_generator/    → S(i) ∼ πθ(·|C) (1 LLM call)
+        ├─→ utils/executor/executor.py → x(i) = Φ(S(i), E) (AgentLoop execution)
+        ├─→ layers/surrogate_verifier/ → R̃, F(i,j)
+        ├─→ layers/oracle/            → R (pass/fail)
+        └─→ layers/surrogate_verifier/ → V(j+1) (if R̃=1 ∧ R<1)
 ```
 
 ## Key Design Decisions
@@ -93,6 +95,12 @@ scripts/evolve.py
 3. **Abstract LLM interface in `utils/llm/`**: enables hot-swapping Claude/GPT/open-source backends
 4. **Sandboxed executor in `utils/executor/`**: rollout Φ requires isolated Docker environments, independent of LLM
 5. **`eval/` separated from `engine/`**: evolution and evaluation are distinct phases, no circular deps
+6. **Generator πθ separate from Executor Φ**: Following Algorithm 1 faithfully — `S(i) ∼ πθ(·|C)` generates skill as structured output (SKILL.md + scripts/), then `Φ(S,E)` executes it via an independent AgentLoop with execution-only prompt. This avoids the original unified-AgentLoop problem where skill generation and execution shared a single turn budget.
+7. **Executor injects full SKILL.md into agent prompt**: The executor's `_build_skills_block()` passes the complete skill content to the execution agent, matching the paper's Φ(S, E) design where `ht` (conversation history) carries skill knowledge.
+8. **V persistence across evaluate calls**: `SurrogateVerifier.evaluate()` returns the test suite as its third return value so `engine/evolution.py` can persist it as `V`. This ensures V(j) is fixed across surrogate retry rounds (matching Alg. 1 line 18: "V(j) locked") and only grows via `escalate()` when R̃=1 ∧ R<1. Previously, evaluate() generated tests internally but discarded them, so V was always `[]` except after escalations.
+9. **Environment context injected into Generator**: The Generator πθ receives a dense summary of task environment files (`test.bib`, reference docs, pre-installed skill SKILL.md, pip dependencies) injected into its conversation context C. This compensates for the Generator/Executor split: while the paper uses a unified agent loop that discovers files interactively, our Generator stays a single LLM call with pre-loaded environment context. See `_build_environment_context()` in `engine/evolution.py`.
+10. **Test runner namespace includes common modules**: `TestRunner._run_single_assertion()` injects `json`, `re`, `Path` into the exec namespace alongside `os` and `open`. This prevents NameError when the Verifier LLM's generated assertions use these modules without explicit imports. The namespace is shared across all assertions in a single evaluate call so that setup code (e.g., loading a JSON file) remains available. Both the generate and escalate prompts tell the LLM which modules are pre-available.
+11. **Verifier feedback constrained to visible evidence**: The `VERIFIER_SYSTEM_PROMPT` and `_generate_feedback()` prompt explicitly forbid speculating about invisible causes (file permissions, symlinks, sandbox, network). Root-cause analysis is limited to what can be directly observed from the test failures and output files. This aligns with the paper's constraint that the Verifier observes "only the task instruction I and the output files x(i)" (§3.3).
 
 ## Key Parameters (from paper §4.1, Table A1)
 
@@ -127,40 +135,51 @@ The full Algorithm 1 co-evolution loop runs end-to-end. Progress through the loo
 Algorithm 1 progress (key: ✅ working, ⚠️ partial, ❌ blocked, — unreachable):
 
 C ← (I, Smeta)                                      ✅
-S(0) ~ πθ(·|C)                                      ✅ LLM generates initial skill bundle
+S(0) ~ πθ(·|C)                                      ✅ SkillGenerator returns SkillBundle
 V(0) ← ∅                                            ✅
 n←0; r←0; Rbest←0; S*←S(0)                         ✅
 
 while n<N and r<M:
-    x(i) ← Φ(S(i), E)                               ✅ proot path virtualization works;
-                                                        dependencies installed via pip
+    x(i) ← Φ(S(i), E)                               ✅ Executor class (AgentLoop
+                                                        with EXECUTION prompt)
     context > β check                                — (not yet triggered)
-    R̃(i,j) ← evaluate(x, V)                         ⚠️ partially tested
+    R̃(i,j) ← evaluate(x, V)                         ✅ SurrogateVerifier works
     if R̃ < 1:
         C ← C ⊕ F                                   ✅
-        S(i+1) ← refine                             ?
+        S(i+1) ← refine                             ✅ SkillGenerator refines with feedback
         r++; continue
-    x̂(i) ← Φ(S(i), E')   fresh env                  — unreachable
-    R(i) ← oracle                                     — unreachable (never called)
-    V(j+1) ← escalate                                — unreachable
+    x̂(i) ← Φ(S(i), E')   fresh env                  ✅ Oracle sandbox with deps
+    R(i) ← oracle                                     ✅ Oracle returns R
+    V(j+1) ← escalate                                ✅
 ```
 
 ### Current State (2026-05-24)
 
-The core infrastructure is working:
-- **Sandbox**: proot-based path virtualization (no `-r`, bind mounts only) gives host access + path remapping. `pip install` runs in host Python venv.
-- **LLM**: DeepSeek V4 Pro connectivity confirmed.
-- **Agent Loop**: JSON protocol (Appendix F.1) works end-to-end.
-- **Skill Generator**: generates and refines skills.
-- **Surrogate Verifier**: generates tests, computes R̃, produces F(i,j) diagnostics.
-- **Engine**: Algorithm 1 main loop, context mgmt, scheduler all functional.
+The full Algorithm 1 loop is operational:
+- **Sandbox**: proot-based path virtualization (no `-r`, bind mounts only). `pip install` in host venv.
+- **LLM**: DeepSeek V4 Pro/Flash confirmed.
+- **SkillGenerator πθ**: generates/refines SkillBundle (SKILL.md + scripts/) via single LLM call. Environment context (input files, reference docs, available skills, pip deps) injected into conversation context C.
+- **Executor Φ(S,E)**: writes skill to sandbox → AgentLoop with `EXECUTION_AGENT_SYSTEM_PROMPT` → collects outputs. Injects full SKILL.md into the agent prompt.
+- **SurrogateVerifier πV_θ**: generates deterministic tests, computes R̃, produces F(i,j) diagnostics. Test suite V is persisted across rounds and escalated only on oracle mismatch. Test runner namespace includes `json`, `re`, `Path` to prevent NameError from Verifier LLM's generated assertions.
+- **Oracle**: fresh sandbox with deps, runs ground-truth tests via test.sh stubs (apt-get/curl stubbed).
+- **Engine**: Algorithm 1 main loop with Generator→Executor→Verifier→Oracle separation. V now correctly returned by evaluate() for persistent test suites.
 - **Tasks**: 94 SkillsBench tasks load correctly.
 
-### What's Not Yet Verified
-- End-to-end evolution on a non-trivial task (oracle path never reached)
-- Dependency installation for heavy tasks (numpy, scipy, lightkurve, etc.)
-- Full convergence to R=1 on any task
+### Verified ✅
+- hello-world converged to R=1 (both with unified AgentLoop and Generator+Executor split)
+- proot path virtualization with bind mounts (v5.3.0 static binary)
+- Oracle sandbox dependency installation
+- Agent JSON protocol parsing with clear error messages
+- Skill refinement loop (R̃ < 1 → feedback → regenerate)
+- V persistence across evaluate calls (generated tests no longer discarded)
+- Environment context injection into Generator (test.bib, ref docs, skill info)
+- Test runner namespace includes common modules (json, re, Path) to prevent verifier assertion NameError
+
+### Not Yet Verified
+- Non-trivial task convergence (citation-check R̃=1 but Oracle R=0 — needs N>2)
+- Heavy dependency tasks (numpy, scipy, lightkurve on exoplanet)
 - Cross-model transfer evaluation
+- Context overflow β cap
 
 ### Environment
 - Python: 3.11.15 venv (`source .venv/bin/activate`)

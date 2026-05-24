@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 import tempfile
 import traceback
+from pathlib import Path
 
 from layers.surrogate_verifier.feedback import PerAssertionResult
 
@@ -52,26 +55,34 @@ class TestRunner:
                 f.write(content)
 
     def _execute_tests(self, tests: list[str], tmp_dir: str) -> list[PerAssertionResult]:
-        """Execute each assertion and collect pass/fail results."""
+        """Execute each assertion and collect pass/fail results.
+
+        All assertions share a single namespace so that setup code
+        (e.g., loading a JSON file) defined in one assertion remains
+        available to subsequent assertions.
+        """
+        namespace: dict = {
+            "os": os,
+            "open": open,
+            "json": json,
+            "re": re,
+            "Path": Path,
+            "__builtins__": __builtins__,
+        }
         results: list[PerAssertionResult] = []
 
         for i, test_code in enumerate(tests):
-            result = self._run_single_assertion(test_code, tmp_dir, i)
+            result = self._run_single_assertion(test_code, tmp_dir, i, namespace)
             results.append(result)
 
         return results
 
-    def _run_single_assertion(self, test_code: str, tmp_dir: str, index: int) -> PerAssertionResult:
-        """Execute a single assertion in an isolated namespace."""
+    def _run_single_assertion(self, test_code: str, tmp_dir: str, index: int,
+                               namespace: dict) -> PerAssertionResult:
+        """Execute a single assertion in the shared namespace."""
         orig_cwd = os.getcwd()
         try:
             os.chdir(tmp_dir)
-
-            namespace: dict = {
-                "os": os,
-                "open": open,
-                "__builtins__": __builtins__,
-            }
 
             try:
                 exec(test_code, namespace)

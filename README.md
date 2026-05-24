@@ -51,21 +51,21 @@ pip install -e ".[anthropic,openai,dev]"  # all at once
 CoEvo/
 ├── utils/                    # Infrastructure
 │   ├── llm/                  #   LLM clients (Anthropic, OpenAI, DeepSeek)
-│   ├── agent/                #   Agent interaction loop (paper's JSON protocol)
-│   ├── executor/             #   Sandbox, environment, rollout Φ(S,E)
+│   ├── agent/                #   Agent interaction loop (JSON protocol + prompts)
+│   ├── executor/             #   Sandbox, Executor Φ(S,E), environment
 │   ├── config.py             #   Configuration loading
 │   └── logger.py             #   Structured logging
 ├── layers/                   # Core model components
-│   ├── skill_generator/      #   Skill Generator (§3.3 Eq.7)
-│   ├── surrogate_verifier/   #   Surrogate Verifier (§3.3 Eq.4,8)
-│   └── oracle/               #   Ground-Truth Oracle (§3.3)
+│   ├── skill_generator/      #   Generator πθ: skill generation/refinement (Eq.7)
+│   ├── surrogate_verifier/   #   Verifier πV_θ: test generation, R̃ computation (Eq.4)
+│   └── oracle/               #   Ground-Truth Oracle: fresh env re-execution (Eq.8)
 ├── engine/                   # Orchestration
-│   ├── evolution.py          #   Algorithm 1 main loop
-│   ├── context.py            #   Conversation context (cap β)
-│   └── scheduler.py          #   Parallel workers
+│   ├── evolution.py          #   Algorithm 1 main co-evolution loop
+│   ├── context.py            #   Conversation context management (cap β)
+│   └── scheduler.py          #   Parallel worker scheduling
 ├── repository/               # Data layer
 │   ├── task.py               #   SkillsBench task loader
-│   ├── skill.py              #   Skill model + SKILL.md parser
+│   ├── skill.py              #   Skill bundle model + SKILL.md parser
 │   └── store.py              #   Artifact persistence
 ├── eval/                     # Evaluation & metrics
 ├── configs/                  # YAML config files
@@ -97,6 +97,9 @@ python scripts/evolve.py --tasks exoplanet-detection-period
 # All tasks with DeepSeek (default)
 python scripts/evolve.py
 
+# Override evolution budget (paper uses N=5, M=15)
+python scripts/evolve.py --tasks citation-check --n 5 --m 15
+
 # Switch to other providers
 python scripts/evolve.py --provider anthropic --model claude-sonnet-4-20250514
 python scripts/evolve.py --provider openai --model gpt-5.2
@@ -110,15 +113,15 @@ python scripts/evolve.py --parallel 2
 
 **What happens:**
 1. Loads each SkillsBench task (instruction + environment).
-2. Initializes the co-evolution loop (Algorithm 1):
-   - Skill Generator creates an initial skill.
-   - Agent executes the skill in a sandbox → output files.
-   - Surrogate Verifier generates tests, runs them against outputs.
-   - If tests fail → structured feedback → skill refinement.
-   - If tests pass → Oracle re-executes in fresh environment.
+2. **Generator πθ** creates an initial skill bundle (SKILL.md + scripts/).
+3. Co-evolution loop (Algorithm 1):
+   - **Executor Φ(S,E)** runs the skill in a sandbox → output files.
+   - **Surrogate Verifier** generates tests, runs them against outputs.
+   - If tests fail → structured feedback → Generator refines the skill.
+   - If tests pass → **Oracle** re-executes in a fresh environment.
    - If Oracle fails → Verifier escalates its tests.
    - Repeat up to N=5 Oracle rounds, M=15 surrogate retries.
-3. Output: evolved skills + round-by-round metrics saved to `./output/`.
+4. Output: evolved skills + round-by-round metrics saved to `./output/`.
 
 ### 2. Evaluation — Test Evolved Skills (Paper §4.2)
 
@@ -171,6 +174,7 @@ output_dir: "./output"
 Override any param via CLI:
 ```bash
 python scripts/evolve.py --model gpt-5.2 --output ./output/gpt_run
+python scripts/evolve.py --n 5 --m 15  # override evolution budget
 ```
 
 Model presets in `configs/models.yaml`.

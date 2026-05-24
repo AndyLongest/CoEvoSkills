@@ -1,39 +1,41 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 
 from repository.skill import SkillBundle, parse_skill_from_text, serialize_skill
+from utils.agent.prompts import GENERATOR_SYSTEM_PROMPT
 from utils.llm.client import LLMClient
 from utils.llm.types import Message
 
+logger = logging.getLogger(__name__)
+
 
 class SkillGenerator:
-    """Skill Generator (§3.3 Eq.7).
+    """Skill Generator πθ (§3.3 Eq.7).
 
     Maintains a persistent conversation context C and iteratively
     generates/refines skill bundles S based on verification feedback F.
 
-    The generator operates in a structured loop:
-      1. Receive task instruction I and initial context (S_meta).
-      2. Explore the environment (list files, check tools).
-      3. Generate/update a skill bundle S.
-      4. Execute the skill to produce outputs.
-      5. If verifier reports failures, refine the skill.
+    Per Algorithm 1:
+      S(i)  ∼ πθ(·|C)            initial generation
+      S(i+1) ∼ πθ(·|C ⊕ F)       refinement with feedback
     """
 
-    def __init__(self, client: LLMClient, system_prompt: str, meta_skill: str = ""):
+    def __init__(self, client: LLMClient, meta_skill: str = ""):
         self.client = client
-        self.system_prompt = system_prompt
         self.meta_skill = meta_skill
         self.context: list[Message] = []
         self._token_count: int = 0
 
-    def init_context(self, instruction: str, previous_skill: SkillBundle | None = None) -> None:
+    def init_context(self, instruction: str, previous_skill: SkillBundle | None = None,
+                     env_context: str = "") -> None:
         """Initialize the conversation context C.
 
         C is initialized as (I, S_meta) per the paper (§3.3).
         If previous_skill is provided, it's included for version tracking.
+        If env_context is provided, environment files and dependencies are injected.
         """
         self.context = []
 
@@ -49,8 +51,13 @@ class SkillGenerator:
                 f"{serialize_skill(previous_skill)}"
             ))
 
-    def generate(self, instruction: str, feedback: str | None = None) -> tuple[str, dict | None]:
-        """Generate or refine a skill, returning raw LLM response.
+        if env_context:
+            self.context.append(Message.user(
+                f"Environment files and available context for this task:\n\n{env_context}"
+            ))
+
+    def generate(self, instruction: str, feedback: str | None = None) -> SkillBundle | None:
+        """Generate or refine a skill bundle.
 
         Args:
             instruction: Task instruction I.
@@ -58,7 +65,7 @@ class SkillGenerator:
                 None on initial generation.
 
         Returns:
-            (raw_response_text, parsed_json_or_None).
+            SkillBundle or None if generation fails.
         """
         if not self.context:
             self.init_context(instruction)
@@ -72,37 +79,41 @@ class SkillGenerator:
         messages = list(self.context)
         response = self.client.send(
             messages=messages,
-            system=self.system_prompt,
+            system=GENERATOR_SYSTEM_PROMPT,
             temperature=0.0,
-            max_tokens=4096,
+            max_tokens=8192,
         )
 
         self.context.append(response.message)
         self._token_count += response.usage.input_tokens + response.usage.output_tokens
 
         text = response.message.content or ""
-        parsed = _try_parse_json(text)
+        logger.info("GENERATOR: response %d chars", len(text))
 
-        return text, parsed
+        return self.extract_skill(text)
 
     def extract_skill(self, response_text: str) -> SkillBundle | None:
         """Extract a SkillBundle from the generator's response.
 
-        The response may contain SKILL.md content delimited by markdown
-        code fences, or the full skill structure.
+        The response is a markdown document with YAML frontmatter (SKILL.md)
+        and optional Python scripts in code blocks with filename=scripts/xxx.py.
         """
-        skillell_content = _extract_code_block(response_text, "markdown")
+        skillell_content = _extract_yaml_block(response_text)
         if not skillell_content:
-            skillell_content = _extract_code_block(response_text, "md")
-        if not skillell_content:
-            skillell_content = _extract_yaml_block(response_text)
+            logger.warning("GENERATOR: no YAML frontmatter found in response")
+            return None
 
-        if skillell_content:
-            skill = parse_skill_from_text(skillell_content)
-            if skill.name == "unnamed":
-                skill.metadata["name"] = "evo-task"
-            return skill
-        return None
+        skill = parse_skill_from_text(skillell_content)
+        if skill.name == "unnamed":
+            skill.metadata["name"] = "evo-task"
+
+        # Extract scripts from filename=scripts/xxx.py code blocks
+        scripts = _extract_script_blocks(response_text)
+        if scripts:
+            skill.scripts = scripts
+            logger.info("GENERATOR: extracted %d script files", len(scripts))
+
+        return skill
 
     def append_feedback(self, feedback: str) -> None:
         """Append failure diagnostic to the conversation context C (Eq.7)."""
@@ -163,3 +174,24 @@ def _extract_yaml_block(text: str) -> str | None:
     if match:
         return f"---\n{match.group(1)}\n---\n{match.group(2)}"
     return None
+
+
+def _extract_script_blocks(text: str) -> dict[str, str]:
+    """Extract script files from filename=scripts/xxx.py code blocks.
+
+    The generator response uses this format:
+    ```python filename=scripts/utils.py
+    def func():
+        pass
+    ```
+
+    Returns dict of {relative_path: content}.
+    """
+    scripts: dict[str, str] = {}
+    pattern = r"```(?:python)?\s+filename=([^\s]+)\s*\n([\s\S]*?)```"
+    for match in re.finditer(pattern, text):
+        filepath = match.group(1).strip()
+        content = match.group(2).strip()
+        if filepath and content:
+            scripts[filepath] = content
+    return scripts

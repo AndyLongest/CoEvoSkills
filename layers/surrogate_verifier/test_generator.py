@@ -18,10 +18,14 @@ Generate Python test assertions that check:
 RULES:
 - Tests MUST be deterministic (no randomness, no external API calls)
 - Tests MUST be self-contained (use only standard library + assertions)
-- Each assertion should be a single Python function with assert statements
+- CRITICAL: Each assertion MUST be EXACTLY ONE assert statement.
+  - NO for loops, while, if/else, try/except, or function definitions
+  - NO multiple statements joined with ;
+  - Variable assignments are OK (one per assertion) for setup (e.g. loading files)
+  - Syntax errors cause immediate compilation failure, wasting limited test slots
 - Tests verify OUTCOMES only, never check which tools were used
 
-Output format: one Python function per assertion, as a list of code strings.
+Output format: a JSON list of assertion code strings. Each string is one Python statement.
 """
 
 TEST_ESCALATE_PROMPT = """\
@@ -41,6 +45,16 @@ Consider:
 Generate NEW test assertions that go beyond your current suite. Keep all
 existing tests and add these new ones. Respond with a JSON list of new
 assertion code strings.
+
+FORMAT: Each assertion must be EXACTLY ONE Python statement — either
+an assignment or a single assert. NO for loops, if/else, try/except,
+semicolons, or function definitions. Variable assignments are OK for setup.
+
+IMPORTANT: The test code is executed via exec() in a namespace that already provides
+os, open, json, re, Path. You do NOT need to import these. For any other modules,
+include your own import statement.
+All assertions share the same namespace — variables defined in one assertion
+are available in subsequent assertions.
 """
 
 
@@ -80,12 +94,25 @@ Agent output files:
 {outputs_summary}
 
 Generate 3-10 deterministic Python test assertions for this task.
-Each assertion should be a function body (no def line needed, just the assert statements).
 
-Respond with a JSON list of strings, each a Python assertion code block.
-IMPORTANT: Use RELATIVE file paths (strip leading /). Files are in the current directory.
-Example:
-["assert os.path.exists('root/output.json'), 'Output file missing'", ...]
+FORMAT: Each assertion must be EXACTLY ONE Python statement — either an assignment or a single assert.
+Do NOT include: for loops, if/else, try/except, ; (semicolons), or function definitions.
+Variable assignments are OK for loading/setup.
+
+Examples of the CORRECT format (use these patterns):
+["data = json.load(open('root/answer.json'))",
+"assert 'fake_citations' in data, 'Missing key'",
+"assert isinstance(data['fake_citations'], list)",
+"assert len(data['fake_citations']) >= 1, 'Expected at least 1 entry'",
+"assert all(isinstance(t, str) for t in data['fake_citations'])"]
+
+IMPORTANT: The test code is executed via exec() in a namespace that already provides
+os, open, json, re, Path. You do NOT need to import these. For any other modules,
+include your own import statement.
+All assertions share the same namespace — variables defined in one assertion
+(e.g., loading a JSON file) are available in subsequent assertions.
+
+Respond with a JSON list of strings.
 """
 
         response = self.client.send(

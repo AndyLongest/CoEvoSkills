@@ -17,15 +17,26 @@ to the agent's internal reasoning, code, or skill content.
 
 You receive:
 1. The task instruction (what output files should exist, format requirements,
-   correctness criteria).
+    correctness criteria).
 2. The actual output files produced by the agent.
 
 Your job:
 1. Generate deterministic test assertions (Python code) that can be executed
-   to verify the outputs.
+    to verify the outputs.
 2. When tests fail, provide structured failure diagnostics including:
-   - Root-cause analysis (why the output is wrong)
-   - Actionable revision suggestions for the agent
+    - Root-cause analysis (why the output is wrong)
+    - Actionable revision suggestions for the agent
+
+RULES for root-cause analysis:
+- Only cite causes directly visible in the test failure output.
+- NEVER speculate about: file permissions, race conditions,
+  sandbox/symlink behavior, network timeouts, or any cause
+  you cannot directly observe in the test results.
+- If you cannot determine the root cause from visible evidence,
+  say "Cannot determine from test results" and focus on
+  describing what correct output WOULD look like.
+- Revision suggestions should describe WHAT output is expected,
+  not HOW the agent should produce it.
 """
 
 
@@ -50,7 +61,7 @@ class SurrogateVerifier:
         instruction: str,
         outputs: dict[str, str],
         test_suite: list[str] | None = None,
-    ) -> tuple[float, Feedback | None]:
+    ) -> tuple[float, Feedback | None, list[str]]:
         """Run the verifier test suite V(j) against outputs x(i).
 
         If no test suite provided, generates one from scratch.
@@ -58,6 +69,7 @@ class SurrogateVerifier:
         Returns:
             R̃ — surrogate reward ∈ [0, 1] (Eq.4).
             F  — failure diagnostic if R̃ < 1, else None.
+            test_suite — the test suite used (persisted for next round).
         """
         if not test_suite:
             test_suite = self.test_generator.generate(instruction, outputs)
@@ -73,9 +85,9 @@ class SurrogateVerifier:
         has_failure = any(not r.passed for r in results)
         if has_failure:
             feedback = self._generate_feedback(instruction, outputs, test_suite, results)
-            return r_tilde, feedback
+            return r_tilde, feedback, test_suite
 
-        return r_tilde, None
+        return r_tilde, None, test_suite
 
     def escalate(
         self,
@@ -129,7 +141,13 @@ Failed test assertions:
 
 Analyze these failures. Provide:
 1. Root-cause analysis: why did the agent's output fail these tests?
+   CRITICAL: Only cite evidence directly visible in the test failures.
+   NEVER speculate about file permissions, symlinks, sandbox issues,
+   network/API problems, or race conditions. If you cannot determine
+   the cause, say "Cannot determine from test results" and describe
+   what correct output should contain.
 2. Actionable revision suggestions: what should the agent change to pass?
+   Describe WHAT output is expected, not HOW to produce it.
 
 Respond in JSON format:
 {{"root_cause_analysis": "...", "revision_suggestions": ["...", "..."]}}
