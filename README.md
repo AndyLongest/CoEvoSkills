@@ -25,7 +25,7 @@ python scripts/evolve.py --tasks citation-check --model deepseek-v4-pro
 ## Prerequisites
 
 | Requirement | Notes |
-|---|---|---|
+|---|---|
 | Python 3.8+ | `tomli` fallback for <3.11 |
 | API key | Default provider: DeepSeek. Set env `DEEPSEEK_API_KEY`. Also supports Anthropic/OpenAI |
 | proot (auto) | Static binary downloaded on first run for path virtualization |
