@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "coevo"
+version = "0.1.0"
+description = "CoEvoSkills: Self-Evolving Agent Skills via Co-Evolutionary Verification"
+requires-python = ">=3.8"
+dependencies = [
+    "pyyaml>=6.0",
+    "docker>=7.0",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.40"]
+openai = ["openai>=1.60"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.5",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["utils", "layers", "engine", "repository", "eval", "scripts"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py38"
+exclude = ["skillsbench", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["N806", "N812", "E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

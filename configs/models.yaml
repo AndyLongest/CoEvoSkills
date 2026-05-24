@@ -1,0 +1,43 @@
+# LLM model configurations
+# Used for hot-swapping backends during evolution and evaluation
+
+models:
+  - id: "deepseek-v4-pro"
+    provider: deepseek
+    description: DeepSeek V4 Pro (default, strongest)
+
+  - id: "deepseek-v4-flash"
+    provider: deepseek
+    description: DeepSeek V4 Flash (fast, cheaper)
+
+  - id: "deepseek-chat"
+    provider: deepseek
+    description: DeepSeek V3 (legacy name, maps to v4-flash non-thinking)
+
+  - id: "deepseek-reasoner"
+    provider: deepseek
+    description: DeepSeek R1 (legacy name, maps to v4-flash thinking)
+
+  - id: "claude-sonnet-4-20250514"
+    provider: anthropic
+    description: Claude Sonnet 4.5
+
+  - id: "claude-opus-4-6"
+    provider: anthropic
+    description: Claude Opus 4.6 (paper primary backbone)
+
+  - id: "gpt-5.2"
+    provider: openai
+    description: GPT-5.2 (secondary backbone)
+
+  - id: "qwen3-coder-480b"
+    provider: openai_compatible
+    description: Qwen3 Coder 480B (transfer evaluation)
+
+  - id: "deepseek-v3"
+    provider: deepseek
+    description: DeepSeek V3 671B (transfer evaluation)
+
+  - id: "mistral-large-3"
+    provider: openai_compatible
+    description: Mistral Large 3 675B (transfer evaluation)

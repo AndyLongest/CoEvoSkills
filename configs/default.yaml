@@ -1,0 +1,23 @@
+# CoEvoSkills default configuration
+# See paper §4.1, Table A1 for parameter descriptions
+
+evolution:
+  n: 2       # max oracle interventions (debug - paper uses 5)
+  m: 3       # max surrogate retries (debug - paper uses 15)
+  beta: 0.7  # context usage cap
+
+timeout:
+  evolution_multiplier: 5.0  # 5× effective 3000s/task
+  evaluation: 7200           # 7200s/task oracle evaluation
+
+workers:
+  evolve: 4   # parallel workers during evolution
+  eval: 10    # parallel workers during evaluation
+
+# LLM model selection (overridable via CLI)
+llm_model: "deepseek-v4-pro"
+verifier_model: null  # defaults to same as llm_model
+
+# Paths
+skillsbench_path: "./skillsbench"
+output_dir: "./output"

@@ -1,0 +1,38 @@
+[
+  {
+    "task": "citation-check",
+    "converged": false,
+    "reward": 0.0,
+    "best_reward": 0.0,
+    "rounds": 3,
+    "oracle_calls": 0,
+    "surrogate_retries": 3,
+    "history": [
+      {
+        "round": 1,
+        "n": 0,
+        "r": 0,
+        "output_count": 0,
+        "r_tilde": 0.0,
+        "exit": "verifier_fail"
+      },
+      {
+        "round": 2,
+        "n": 0,
+        "r": 1,
+        "output_count": 0,
+        "r_tilde": 0.0,
+        "exit": "verifier_fail"
+      },
+      {
+        "round": 3,
+        "n": 0,
+        "r": 2,
+        "output_count": 0,
+        "r_tilde": 0.0,
+        "exit": "verifier_fail"
+      }
+    ],
+    "error": null
+  }
+]

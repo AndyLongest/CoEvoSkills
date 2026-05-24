@@ -1,0 +1,23 @@
+# Python environment and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets and local configuration
+.env
+.env.*
+*.key
+*.pem
+credentials.json
+
+# Logs and temporary files
+*.log
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
