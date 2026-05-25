@@ -1,0 +1,75 @@
+import numpy as np
+from scipy.signal import savgol_filter
+from astropy.timeseries import BoxLeastSquares, LombScargle
+import astropy.units as u
+
+import warnings
+warnings.filterwarnings(warnings.categorize(RuntimeWarning), \"ignore\")
+
+def load_lightcurve(filepath):
+    data = np.loadtxt(filepath, comments='#')
+    time = data[:, 0]
+    flux = data[:, 1]
+    flag = data[:, 2]
+    flux_err = data[:, 3]
+    return time, flux, flag, flux_err
+
+def filter_data(time, flux, flag, flux_err, sigma=3.0):
+    good_flag = flag == 0
+    time = time[good_flag]
+    flux = flux[good_flag]
+    flux_err = flux_err[good_flag]
+    median = np.median(flux)
+    std = np.std(flux)
+    good_sigma = np.abs(flux - median) < sigma * std
+    time = time[good_sigma]
+    flux = flux[good_sigma]
+    flux_err = flux_err[good_sigma]
+    return time, flux, flux_err
+
+def remove_variability(time, flux, flux_err, flux=1.0):
+    "F'ind the dominant stellar rotation period using Lomb-Scargle and subtract it.\""
+    # Lomb-Scargle periodogram
+    ls = LombScargle(time* u.day, flux, dy=flux_err)
+    # Search up to 20 days (for stellar rotation)
+    pg = ls.autopower(minimum_frequency=0.05 / u.day, maximum_period=20*u.day)
+    rot_period = pg.period[np.argmax(pg.power)].value
+    print(f"Stellar rotation period: {rot_period:.3} days")
+
+    # Fit a sine model with multiple harmonics
+    # Use savgol_filter with better window size
+    # Use a large window to capture only long-term trends
+    window = min(5001, len(flux) - 1)
+    if window % 2 == 0:
+        window += 1
+    if window < 3:
+        window = 3
+    trend = savgol_filter(flux, window, polyorder=3)
+    flux_flat = flux - trend + 1.0
+    return flux_flat
+
+def find_exoplanet_period(time, flux, flux_err, min_period=0.5, max_period=20.0):
+    """Find exoplanet period using Box Least Squares with multiple transit durations."""
+    t = time * u.day
+    y = flux
+    dy = flux_err
+    model = BoxLeastSquares(t, y, dy=dy)
+    
+    # Try multiple transit durations
+    durations = np.array([0.02, 0.05, 0.1, 0.2, 0.3] * u.day)
+    improved = model.autopower(durations, minimum_period=min_period * u.day, maximum_period=max_period * u.day)
+    
+    best_idx = np.argmax(improved.power)
+    best_period = improved.period[best_idx].value
+    print(f"Best period using BLS: {best_period:.5} days")
+
+    # Also try TLS if available
+    try:
+        import transitleastsquares as tls
+        tls_result = tls.transitleastsquares(time, flux, ye=flux_err).power(show_progress_bar=False, verbose=False)
+        tls_period = tls_result.period
+        print(f"Best period using TLS: {tls_period:.5} days")
+        return tls_period
+    except ImportError:
+        print("TLS not available, using BLS result")
+        return best_period

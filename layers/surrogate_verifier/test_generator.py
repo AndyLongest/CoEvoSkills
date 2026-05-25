@@ -11,6 +11,12 @@ You receive:
     that were used by the agent (e.g., test.bib). Use these input files to independently
     compute what the CORRECT output should be.
 
+HARDCODED VALUE RULE:
+- NEVER write assertions that compare agent output against a literal number.
+- EVERY numeric comparison MUST derive its expected value at runtime from input data files.
+- If you cannot compute the expected value from inputs, write format-only checks instead.
+- DO NOT guess or hardcode values from the agent's output.
+
 Generate Python test assertions that check:
 - Output file existence
 - File format correctness (valid JSON, correct structure, required fields)
@@ -42,10 +48,16 @@ enough — they may be checking format but missing content errors.
 
 Your task: GENERATE ADDITIONAL, MORE RIGOROUS TEST ASSERTIONS.
 
+CRITICAL DIAGNOSIS:
+- Your existing tests may be checking the WRONG expected value.
+- If you used a hardcoded numeric value, it is likely incorrect.
+- Rewrite tests to derive expected values at runtime from input data files.
+
 Consider:
 - READING INPUT FILES: Your existing tests may only check output format.
   ADD tests that read the input data (e.g., test.bib) and independently compute
   what the correct answer should be, then compare against the agent's output.
+- DO NOT check against any hardcoded numeric values. Compute expected values at runtime.
 - Tighter tolerances and edge cases
 - Missing content checks your current suite might have missed
 - Boundary conditions and hidden assumptions in the instruction
@@ -108,6 +120,10 @@ Agent output files (including input data used by the agent):
 
 Generate 5-15 deterministic Python test assertions for this task.
 Use the input files to independently compute expected answers, then compare with output.
+NEVER hardcode expected numeric values; derive them at runtime from input data.
+CRITICAL: Always include explicit checks that ALL required output files in the instruction
+exist (e.g., if the instruction says to write /root/period.txt, ensure the tests assert that
+root/period.txt exists). Missing required files must fail the test suite.
 
 APPROACH:
 1. First, write setup assertions to load data: import libraries, read input files, parse JSON.
@@ -116,12 +132,19 @@ APPROACH:
 All assertions share the same namespace.
 
 EXAMPLES of CONTENT-driven tests (read input files, compute expected, compare):
-["import bibtexparser",
- "data = json.load(open('root/answer.json'))",
- "with open('root/test.bib') as f: bib_db = bibtexparser.loads(f.read())",
- "suspicious_dois = ['10.1234/', '10.5678/']",
- "expected_titles = sorted(e.get('title','') for e in bib_db.entries if any(e.get('doi','').startswith(p) for p in suspicious_dois))",
- "assert data['fake_citations'] == expected_titles, f'Expected {{expected_titles}}, got {{data[\"fake_citations\"]}}'"]
+[
+ "import numpy as np",
+ "scores = np.loadtxt('root/data/scores.txt')",
+ "expected_mean = float(np.mean(scores))",
+ "agent_value = float(open('root/result.txt').read().strip())",
+ "assert abs(agent_value - expected_mean) < 0.001, f'Expected {{expected_mean}}, got {{agent_value}}'"
+]
+
+Example of what NOT to do (hardcoded):
+[
+ "agent_value = float(open('root/result.txt').read().strip())",
+ "assert abs(agent_value - 6.88239) < 0.01  # WRONG: hardcoded expected value"
+]
 
 FORMAT: Each item must be EXACTLY ONE Python statement — an import, assignment, or single assert.
 NO for loops, if/else, try/except, ;, or function definitions.
@@ -236,11 +259,44 @@ def _extract_python_blocks(text: str) -> list[str]:
 
 
 def _generate_fallback_tests(instruction: str, outputs: dict[str, str]) -> list[str]:
-    """Generate basic tests when LLM parsing fails."""
+    """Generate basic tests when LLM parsing fails.
+
+    Produces:
+      - File existence checks for each output file.
+      - Format validations: for files with known extensions (.json, .txt),
+        try to parse and validate basic structure.
+      - A meaningful fallback when no outputs exist.
+    """
+    import os.path
+
     tests: list[str] = []
+
     for path in outputs:
         relpath = path.lstrip("/")
-        tests.append(f"assert os.path.exists('{relpath}'), 'Output file {relpath} missing'")
+        _, ext = os.path.splitext(path)
+        ext = ext.lower()
+        fname = os.path.basename(path).lower()
+
+        tests.append(
+            f"assert os.path.exists('{relpath}'), 'Output file {relpath} missing'"
+        )
+
+        # For .json outputs, verify they're parseable
+        if ext == ".json":
+            tests.append(
+                f"_data = json.load(open('{relpath}'))\n"
+                f"assert _data is not None, 'JSON file {relpath} is empty'"
+            )
+        # For .txt numeric outputs (e.g., period.txt), try float parse
+        elif ext == ".txt" or ext == "":
+            if any(kw in fname for kw in ("period", "answer", "result", "value", "output", "score")):
+                tests.append(
+                    f"_text = open('{relpath}').read().strip()\n"
+                    f"_val = float(_text)\n"
+                    f"assert isinstance(_val, (int, float)), 'Output file {relpath} must contain a number'"
+                )
+
     if not tests:
         tests.append("assert False, 'No output files produced by the agent'")
+
     return tests

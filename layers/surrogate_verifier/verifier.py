@@ -36,8 +36,9 @@ RULES for root-cause analysis:
 - If you cannot determine the root cause from visible evidence,
   say "Cannot determine from test results" and focus on
   describing what correct output WOULD look like.
-- Revision suggestions should describe WHAT output is expected,
-  not HOW the agent should produce it.
+- Revision suggestions should describe WHAT output is expected and MAY include
+  HOW the agent should produce it, including specific algorithms, libraries,
+  or pre-installed skills to use when appropriate.
 """
 
 
@@ -46,10 +47,10 @@ class SurrogateVerifier:
 
     Operates in a completely independent LLM session πV_θ, observing only
     the task instruction I and output files x(i). It:
-      1. Generates/refines a proxy test suite V.
-      2. Computes the surrogate reward R̃ (Eq.4).
-      3. Produces structured failure diagnostics F when R̃ < 1.
-      4. Escalates tests when R̃=1 but oracle reports failure.
+       1. Generates/refines a proxy test suite V.
+       2. Computes the surrogate reward R̃ (Eq.4).
+       3. Produces structured failure diagnostics F when R̃ < 1.
+       4. Escalates tests when R̃=1 but oracle reports failure.
     """
 
     def __init__(self, client: LLMClient):

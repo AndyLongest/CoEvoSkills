@@ -18,6 +18,14 @@ from utils.llm.client import LLMClient
 
 logger = logging.getLogger(__name__)
 
+SKILL_DISCOVERY_HINT = """\
+Important: Specialized skills are available. Load relevant skills before starting
+to get domain-specific guidance, code utilities, and best practices for this task.
+Use the JSON field "load_skill" (e.g., {"load_skill": "skill-name"}).
+Background reference documents may be available under /app/environment/doc/.
+Read all documents there before starting.
+"""
+
 
 @dataclass
 class EvolutionMetrics:
@@ -72,14 +80,21 @@ def run_evolution(
     print(f"\n{C.header(f'EVOLVE: {task.name}  |  N={config.evolution.n}, M={config.evolution.m}')}")
     print(f"{C.header('=' * 60)}")
 
+    deps = _extract_deps_from_task(task)
+
+    _install_host_deps(deps)
+
     sandbox = Sandbox()
-    sandbox.setup(install_deps=_extract_deps_from_task(task))
+    sandbox.setup(install_deps=deps)
 
     generator = SkillGenerator(client=client, meta_skill=meta_skill)
     if skill_loader:
         generator.set_skill_loader(skill_loader)
 
     try:
+        instruction = task.instruction
+        if task.environment.pre_installed_skills:
+            instruction = f"{instruction}\n\n{SKILL_DISCOVERY_HINT}"
         task.environment.prepare_sandbox(sandbox)
 
         # Build environment context for the Generator
@@ -87,18 +102,8 @@ def run_evolution(
         if env_context:
             store.write_log(task.name, "Environment context injected into generator")
 
-        # === 1. Generate initial skill S(0) and execute: x(0) = Φ(S(0), E) ===
-        print(f"  {C.cyan('GENERATOR')} | Generating initial skill and executing...")
-        S, outputs = generator.generate_and_execute(
-            task.instruction, sandbox, env_context=env_context,
-            installed_tools=_get_installed_tools(sandbox),
-        )
-        if S is None:
-            S = SkillBundle(name=f"evo-{task.name}", skillell="# Initial skill\n")
-        S_best = S
-        store.write_log(task.name, f"Initial skill: {S.name}")
-        write_skill(S, skill_dir)
-        print(f"  {C.cyan('GENERATOR')} | Skill '{S.name}' generated, {len(outputs)} output files")
+        first_run = True
+        pending_feedback: str | None = None
 
         while n < config.evolution.n and r < config.evolution.m:
             metrics.rounds += 1
@@ -106,7 +111,36 @@ def run_evolution(
             store.write_log(task.name, f"Round {metrics.rounds}: n={n}, r={r}")
             print(f"\n{C.bold(C.yellow(f'─── ROUND {metrics.rounds} ───  n={n}/{config.evolution.n} oracle  r={r}/{config.evolution.m} surrogate'))}")
 
-            # === 2. Execute was already done by Generator AgentLoop ===
+            # === 1. Execute skill: x(i) = Φ(S(i), E) (Alg. 1, line 7) ===
+            if first_run:
+                print(f"  {C.cyan('GENERATOR')} | Generating initial skill and executing...")
+                S, outputs = generator.generate_and_execute(
+                    instruction, sandbox, env_context=env_context,
+                    installed_tools=_get_installed_tools(sandbox),
+                )
+                first_run = False
+            elif pending_feedback:
+                print(f"  {C.cyan('GENERATOR')} | Refining skill and re-executing...")
+                S, outputs = generator.generate_and_execute(
+                    instruction, sandbox,
+                    feedback=pending_feedback,
+                )
+                pending_feedback = None
+            else:
+                print(f"  {C.cyan('GENERATOR')} | Executing current skill...")
+                S, outputs = generator.generate_and_execute(
+                    instruction, sandbox,
+                )
+
+            if S is None:
+                S = SkillBundle(name=f"evo-{task.name}", skillell="# Fallback skill\n")
+            S_best = S
+            if metrics.rounds == 1:
+                store.write_log(task.name, f"Initial skill: {S.name}")
+            write_skill(S, skill_dir)
+            print(f"  {C.cyan('GENERATOR')} | Skill '{S.name}' generated, {len(outputs)} output files")
+
+            # === 2. Record execution outputs ===
             round_record["output_count"] = len(outputs)
             store.write_log(task.name,
                 f"Generator complete: {len(outputs)} files: {list(outputs.keys())[:5]}")
@@ -114,8 +148,16 @@ def run_evolution(
 
             # === 3. Surrogate Verifier: R̃(i,j) ← evaluate(x(i), V(j)) ===
             store.write_log(task.name, "Phase: verifier")
-            print(f"  {C.yellow('VERIFIER')}  | Evaluating {len(outputs)} files with {len(V)} tests...")
-            r_tilde, feedback, V = verifier.evaluate(task.instruction, outputs, V)
+
+            # Merge input data files so the Verifier can independently read
+            # them and compute expected values for content-level tests.
+            # Data files live at /root/data/ (per task instruction convention).
+            verifier_outputs = dict(outputs)
+            for data_path, content in task.environment.data_files.items():
+                verifier_outputs[f"root/data/{data_path}"] = content
+
+            print(f"  {C.yellow('VERIFIER')}  | Evaluating {len(verifier_outputs)} files ({len(outputs)} agent + {len(task.environment.data_files)} data) with {len(V)} tests...")
+            r_tilde, feedback, V = verifier.evaluate(instruction, verifier_outputs, V)
             round_record["r_tilde"] = r_tilde
             store.write_log(task.name,
                 f"Surrogate R̃ = {r_tilde:.2f}, tests={len(V)}, outputs={len(outputs)}")
@@ -126,16 +168,7 @@ def run_evolution(
                 if feedback:
                     store.write_log(task.name,
                         f"Verifier feedback: {feedback.root_cause_analysis[:100]}...")
-                    print(f"  {C.cyan('GENERATOR')} | Refining skill and re-executing...")
-                    S, outputs = generator.generate_and_execute(
-                        task.instruction, sandbox,
-                        feedback=feedback.to_context_str(),
-                    )
-                    if S is None:
-                        S = SkillBundle(name=f"evo-{task.name}", skillell="# Fallback skill\n")
-                    S_best = S
-                    write_skill(S, skill_dir)
-                    print(f"  {C.cyan('GENERATOR')} | Skill '{S.name}' refined")
+                    pending_feedback = feedback.to_context_str()
 
                 round_record["exit"] = "verifier_fail"
                 metrics.history.append(round_record)
@@ -156,6 +189,7 @@ def run_evolution(
 
             if oracle_r == 1:
                 S_best = S
+                R_best = 1.0
                 metrics.final_reward = 1.0
                 metrics.best_reward = 1.0
                 metrics.converged = True
@@ -174,7 +208,7 @@ def run_evolution(
 
             # === 6. Co-evolution: escalate verifier tests V(j+1) ===
             generator.append_oracle_signal(False)
-            V = verifier.escalate(task.instruction, outputs, V)
+            V = verifier.escalate(instruction, outputs, V)
             round_record["exit"] = "oracle_fail_escalate"
             round_record["V_size"] = len(V)
             metrics.history.append(round_record)
@@ -336,12 +370,47 @@ def _extract_deps_from_task(task: Task) -> list[str]:
         if not match:
             continue
         pkgs_str = match.group(1)
-        # Remove pip flags (--flag, --flag=val, -x) before extracting package names
-        pkgs_str = re.sub(r'(?:--\S+?=\S+|--\S+|-\w)\s*', '', pkgs_str).strip()
+        # Remove pip flags (--flag=val, --flag, -flag) before extracting package names
+        # Split by space and filter out flag tokens to avoid stripping hyphens
+        # from package names (e.g., -p in batman-package).
+        pkgs_str = ' '.join(
+            t for t in pkgs_str.split()
+            if not t.startswith('-')
+        )
         for token in re.findall(r'(["\']?)([a-zA-Z_][\w\-\.]*)\1', pkgs_str):
-            deps.append(token[1])
+            name = token[1]
+            # Skip tokens that look like version numbers (pure digits, e.g. "81" from setuptools<81)
+            if re.match(r'^\d+(\.\d+)*$', name):
+                continue
+            deps.append(name)
 
     return deps
+
+
+def _install_host_deps(deps: list[str]) -> None:
+    """Install pip dependencies on the host for the Verifier's test runner.
+
+    The Verifier's TestRunner runs exec() on the host (not inside the sandbox)
+    and needs task-specific Python packages (numpy, lightkurve, etc.) to
+    execute content-level test assertions that import them.
+    """
+    if not deps:
+        return
+    import subprocess
+    import sys
+
+    try:
+        logger.info("Installing %d host deps for Verifier: %s", len(deps), ", ".join(deps))
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", *deps],
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode != 0:
+            logger.warning("Host dep install had issues: %s", result.stderr[:200])
+    except subprocess.TimeoutExpired:
+        logger.warning("Host dep install timed out after 300s")
+    except Exception as e:
+        logger.warning("Host dep install failed: %s", e)
 
 
 def _get_env_files_info(sandbox: Sandbox) -> str:

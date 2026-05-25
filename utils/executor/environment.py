@@ -86,6 +86,7 @@ def _extract_deps(dockerfile: str) -> list[str]:
 
     Looks for RUN pip install lines, handles multi-line (backslash) continuations.
     Strips pip flags (--flag, --flag=val, -x) before extracting package names.
+    Strips version specifiers (==, >=, <=, !=, ~=, <, >) from package names.
     """
     import re
 
@@ -100,8 +101,17 @@ def _extract_deps(dockerfile: str) -> list[str]:
         if not match:
             continue
         pkgs_str = match.group(1).strip()
-        # Remove pip flags before extracting package names
-        pkgs_str = re.sub(r'(?:--\S+?=\S+|--\S+|-\w)\s*', '', pkgs_str).strip()
+        # Remove pip flags (--flag=val, --flag, -flag) before extracting package names
+        # Split by space and filter out flag tokens to avoid stripping hyphens
+        # from package names (e.g., -p in batman-package).
+        pkgs_str = ' '.join(
+            t for t in pkgs_str.split()
+            if not t.startswith('-')
+        )
         for token in re.findall(r'(["\']?)([a-zA-Z_][\w\-\.]*)\1', pkgs_str):
-            deps.append(token[1])
+            name = token[1]
+            # Skip tokens that look like version numbers (pure digits, e.g. "81" from setuptools<81)
+            if re.match(r'^\d+(\.\d+)*$', name):
+                continue
+            deps.append(name)
     return deps
