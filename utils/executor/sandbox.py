@@ -110,7 +110,8 @@ class Sandbox:
                 result = subprocess.run(
                     proot_cmd,
                     capture_output=True,
-                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=timeout,
                     env={**os.environ, "PROOT_NO_SECCOMP": "1"},
                 )
@@ -120,7 +121,8 @@ class Sandbox:
                     command,
                     shell=True,
                     capture_output=True,
-                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=timeout,
                     cwd=str(self._workspace),
                     env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"},

@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 
 from utils.agent.prompts import EVOLUTION_AGENT_SYSTEM_PROMPT
+from utils.colors import C
 from utils.executor.sandbox import Sandbox
 from utils.llm.client import LLMClient
 from utils.llm.types import Message
@@ -136,7 +137,7 @@ class AgentLoop:
                 return False, self._conversation_summary()
 
             logger.info("Agent turn %d/%d", self._turn_count + 1, self.max_turns)
-            print(f"  GENERATOR | Turn {self._turn_count + 1}/{self.max_turns}...")
+            print(f"  {C.dim('GENERATOR')} | Turn {self._turn_count + 1}/{self.max_turns}...")
             response = self.client.send(
                 messages=list(self._messages),
                 system=prompt,

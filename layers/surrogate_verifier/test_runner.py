@@ -9,6 +9,7 @@ import traceback
 from pathlib import Path
 
 from layers.surrogate_verifier.feedback import PerAssertionResult
+from utils.colors import C
 
 logger = logging.getLogger(__name__)
 
@@ -84,17 +85,23 @@ class TestRunner:
         try:
             os.chdir(tmp_dir)
 
+            # Safety net: replace absolute /root/ and /app/ paths with relative
+            # versions in case the Verifier LLM generates absolute paths despite
+            # the prompt telling it to use relative paths.
+            test_code = re.sub(r"['\"]/root/", "'root/", test_code)
+            test_code = re.sub(r"['\"]/app/", "'app/", test_code)
+
             try:
                 exec(test_code, namespace)
                 logger.info("ASSERT[%d]: PASS — %s", index, test_code[:120])
-                print(f"  VERIFIER  |   ✓ [{index}] {test_code[:100]}")
+                print(f"  {C.dim('VERIFIER')}  |   {C.green('✓')} [{index}] {test_code[:100]}")
                 return PerAssertionResult(
                     assertion=test_code,
                     passed=True,
                 )
             except AssertionError as e:
                 logger.info("ASSERT[%d]: FAIL — %s", index, test_code[:120])
-                print(f"  VERIFIER  |   ✗ [{index}] {test_code[:100]}")
+                print(f"  {C.dim('VERIFIER')}  |   {C.red('✗')} [{index}] {test_code[:100]}")
                 return PerAssertionResult(
                     assertion=test_code,
                     passed=False,
@@ -102,7 +109,7 @@ class TestRunner:
                 )
             except Exception as e:
                 logger.info("ASSERT[%d]: ERROR — %s", index, test_code[:120])
-                print(f"  VERIFIER  |   ! [{index}] {test_code[:100]}")
+                print(f"  {C.dim('VERIFIER')}  |   {C.red('!')} [{index}] {test_code[:100]}")
                 return PerAssertionResult(
                     assertion=test_code,
                     passed=False,

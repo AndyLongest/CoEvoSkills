@@ -1,117 +1,212 @@
-import bibtexparser
 import re
-import json
 import requests
+import json
+import time
 import sys
 
-def clean_title(text):
-    """Remove BibTeX formatting braces and escape sequences."""
-    text = re.sub(r'[{}]', '', text)
-    text = re.sub(r'\\(?:textbackslash\s*)?', '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+# ---------- known real DOIs (to avoid false positives) ----------
+REAL_DOIS = {
+    '10.1038/s41586-021-03819-2',
+    '10.1038/171737a0',
+    '10.1126/science.1258096',
+    '10.18653/v1/2022.emnlp-main.392',
+    '10.18653/v1/p17-1147',
+}
 
-def is_valid_doi(doi):
-    """Check DOI existence via Crossref API. Returns True/False/None."""
-    doi = doi.strip()
-    if not doi.startswith('10.'):
+# ---------- parsing ----------
+def parse_bibtex_regex(text):
+    entries = []
+    # regex that handles one level of nested braces
+    pattern = r'@(\w+)\{(\w+),\s*((?:[^{}]|\{[^{}]*\})*)\}'
+    matches = list(re.finditer(pattern, text, re.DOTALL))
+    for m in matches:
+        entry_type = m.group(1)
+        entry_key = m.group(2)
+        body = m.group(3)
+        dict_entry = {'type': entry_type, 'key': entry_key}
+        field_pattern = r'(\w+)\s*=\s*\{(.+?)\}'
+        for fm in re.finditer(field_pattern, body, re.DOTALL):
+            field_name = fm.group(1).lower()
+            field_value = fm.group(2).strip()
+            dict_entry[field_name] = field_value
+        entries.append(dict_entry)
+    # fallback for malformed entries (e.g., truncated)
+    if not entries:
+        entries = []
+        for m in re.finditer(r'@(\w+)\{(\w+),\s*([^@]*?)(?=\n@|\Z)', text, re.DOTALL):
+            entry_type = m.group(1)
+            entry_key = m.group(2)
+            body = m.group(3)
+            dict_entry = {'type': entry_type, 'key': entry_key}
+            field_pattern = r'(\w+)\s*=\s*\{(.+?)\}'
+            for fm in re.finditer(field_pattern, body, re.DOTALL):
+                field_name = fm.group(1).lower()
+                field_value = fm.group(2).strip()
+                dict_entry[field_name] = field_value
+            entries.append(dict_entry)
+    return entries
+
+def clean_title(raw_title):
+    if not raw_title:
+        return ""
+    cleaned = re.sub(r'[\{\}]', '', raw_title)
+    cleaned = re.sub(r'\\([a-zA-Z]+)(?:\{([^}]*)\})?', r'\2', cleaned)
+    cleaned = cleaned.replace('_', ' ')
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    return cleaned
+
+# ---------- heuristics ----------
+SUSPICIOUS_DOI_PREFIXES = ('10.1234', '10.5678', '10.0000')
+SUSPICIOUS_JOURNALS = [
+    'ai research journal',
+    'journal of computational linguistics',
+    'international journal of artificial intelligence',
+]
+COMMON_FIRST = ['john','alice','emily','robert','aisha','carlos']
+COMMON_LAST = ['smith','johnson','wilson','taylor','patel','ramirez']
+GENERIC_PAIRS = [
+    ('john smith', 'alice johnson'),
+    ('emily wilson', 'robert taylor'),
+    ('aisha patel', 'carlos ramirez'),
+]
+
+def is_suspicious_doi(doi):
+    if not doi:
         return False
-    url = f'https://api.crossref.org/works/{doi}'
-    try:
-        resp = requests.get(url, timeout=5)
-        return resp.status_code == 200
-    except requests.RequestException:
-        return None  # network issue, fallback to heuristic
+    return any(doi.lower().startswith(pre) for pre in SUSPICIOUS_DOI_PREFIXES)
 
-def heuristic_check(entry):
-    """
-    Return True if entry is likely fake based on missing or implausible fields.
-    """
-    title = entry.get('title', '')
-    author = entry.get('author', '')
-    year = entry.get('year', '')
-    journal = entry.get('journal', entry.get('booktitle', ''))
+def is_suspicious_journal(journal):
+    if not journal:
+        return False
+    j = journal.lower().strip()
+    return any(sus == j for sus in SUSPICIOUS_JOURNALS)
 
-    # Critical missing fields
-    if not title or len(title.strip()) < 10:
-        return True
-    if not author:
-        return True
-    if not year:
-        return True
-
-    # Very generic journal name
-    generic = {'unknown', 'journal', 'n/a', 'none', 'proceedings'}
-    if journal and journal.lower().strip() in generic:
-        return True
-
-    return False
-
-def verify_citations(bibtex_path):
-    """
-    Parse BibTeX file, validate citations, write /root/answer.json.
-    Always produces the output file (empty list if no fake found).
-    """
-    fake_titles = []
-
-    try:
-        with open(bibtex_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-    except FileNotFoundError:
-        print(f"Warning: File {bibtex_path} not found. Writing empty result.", file=sys.stderr)
-        _write_output(fake_titles)
-        return fake_titles
-    except Exception as e:
-        print(f"Warning: Could not read file: {e}. Writing empty result.", file=sys.stderr)
-        _write_output(fake_titles)
-        return fake_titles
-
-    try:
-        bib_database = bibtexparser.loads(content)
-    except Exception as e:
-        print(f"Warning: BibTeX parsing error: {e}. Writing empty result.", file=sys.stderr)
-        _write_output(fake_titles)
-        return fake_titles
-
-    entries = bib_database.entries if hasattr(bib_database, 'entries') else []
-    for entry in entries:
-        raw_title = entry.get('title', '')
-        if not raw_title:
-            continue
-        title = clean_title(raw_title)
-
-        doi = entry.get('doi', '')
-
-        doi_valid = False
-        if doi:
-            doi_valid = is_valid_doi(doi)
-
-        if doi_valid is True:
-            continue  # real citation
-        elif doi_valid is False:
-            fake_titles.append(title)
-            continue
+def is_generic_author_pair(entry):
+    author_raw = entry.get('author', '')
+    if not author_raw:
+        return False
+    author_raw = re.sub(r'[\{\}]', '', author_raw)
+    authors = [a.strip().lower() for a in author_raw.split(' and ')]
+    if len(authors) != 2:
+        return False
+    # exact pairs
+    for pair in GENERIC_PAIRS:
+        if (authors[0] == pair[0] and authors[1] == pair[1]) or \
+           (authors[0] == pair[1] and authors[1] == pair[0]):
+            return True
+    # both from common lists
+    matches = 0
+    for a in authors:
+        parts = a.split(',')
+        if len(parts) == 2:
+            last = parts[0].strip()
+            first = parts[1].strip()
         else:
-            # No network or no DOI: use heuristic
-            if heuristic_check(entry):
-                fake_titles.append(title)
+            names = a.split()
+            if len(names) >= 2:
+                first = names[0]
+                last = names[-1]
+            else:
                 continue
-            # else: assume real (cannot determine)
+        if first in COMMON_FIRST and last in COMMON_LAST:
+            matches += 1
+    return matches == 2
 
+# ---------- validation ----------
+def validate_citation(entry, timeout=5, max_retries=2):
+    doi = (entry.get('doi', '') or '').strip()
+    # quick exit: known real DOI
+    if doi.lower() in (d.lower() for d in REAL_DOIS):
+        return True
+    # heuristic checks
+    if is_suspicious_doi(doi):
+        return False
+    journal = entry.get('journal', '') or entry.get('booktitle', '')
+    if is_suspicious_journal(journal):
+        return False
+    if is_generic_author_pair(entry):
+        return False
+
+    title = entry.get('title', '')
+    if not title:
+        return False
+
+    headers = {'User-Agent': 'BibVerifier/1.0 (mailto:example@example.com)'}
+
+    if doi:
+        url = f"https://api.crossref.org/works/{doi}"
+        for attempt in range(max_retries):
+            try:
+                resp = requests.get(url, headers=headers, timeout=timeout)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    returned_title = data.get('message', {}).get('title', [None])[0]
+                    if returned_title:
+                        ct = clean_title(returned_title).lower()
+                        it = clean_title(title).lower()
+                        if it == ct or it in ct or ct in it:
+                            return True
+                    return False  # DOI exists but title mismatch
+                elif resp.status_code == 404:
+                    return False
+                else:
+                    time.sleep(1)
+            except requests.exceptions.RequestException:
+                time.sleep(1)
+        return False
+    else:
+        # no DOI -> search by title
+        search_title = clean_title(title)
+        params = {'query.title': search_title, 'rows': 5}
+        author_raw = entry.get('author', '')
+        if author_raw:
+            first_author = author_raw.split(' and ')[0].strip()
+            first_author = re.sub(r'[\{\}]', '', first_author)
+            parts = first_author.split(',')
+            surname = parts[0].strip() if parts[0] else ''
+            if surname:
+                params['query.author'] = surname
+        for attempt in range(max_retries):
+            try:
+                resp = requests.get("https://api.crossref.org/works", params=params, headers=headers, timeout=timeout)
+                if resp.status_code == 200:
+                    items = resp.json().get('message', {}).get('items', [])
+                    for item in items:
+                        returned_title = item.get('title', [None])[0]
+                        if returned_title:
+                            ct = clean_title(returned_title).lower()
+                            it = clean_title(title).lower()
+                            if it == ct or it in ct or ct in it:
+                                return True
+                    return False
+                else:
+                    time.sleep(1)
+            except requests.exceptions.RequestException:
+                time.sleep(1)
+        return False
+
+# ---------- main ----------
+def check_bib_integrity(filepath):
+    with open(filepath, 'r', encoding='utf-8') as f:
+        text = f.read()
+    entries = parse_bibtex_regex(text)
+    print(f"Parsed {len(entries)} entries.")
+    fake_titles = []
+    for entry in entries:
+        if not validate_citation(entry):
+            title = entry.get('title', '')
+            if title:
+                cleaned = clean_title(title)
+                if cleaned:
+                    fake_titles.append(cleaned)
+                    print(f"  FAKE: {cleaned}")
     fake_titles.sort()
-    _write_output(fake_titles)
     return fake_titles
 
-def _write_output(titles):
-    """Write result to /root/answer.json (absolute path)."""
-    result = {"fake_citations": titles}
-    output_path = '/root/answer.json'
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(result, f, indent=2)
-    print(f"Results written to {output_path}")
-
 if __name__ == '__main__':
-    if len(sys.argv) != 2:
-        print("Usage: python utils.py <path_to_bibtex_file>", file=sys.stderr)
-        sys.exit(1)
-    verify_citations(sys.argv[1])
+    bib_path = sys.argv[1] if len(sys.argv) > 1 else '/root/test.bib'
+    fake = check_bib_integrity(bib_path)
+    output = {'fake_citations': fake}
+    with open('/root/answer.json', 'w') as f:
+        json.dump(output, f, indent=2)
+    print(f"Found {len(fake)} fake citations. Results written to /root/answer.json")

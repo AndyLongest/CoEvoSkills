@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-import json
 import logging
-import re
+from pathlib import Path
+from collections.abc import Callable
 
-from repository.skill import SkillBundle, parse_skill_from_text, serialize_skill
-from utils.agent.prompts import GENERATOR_SYSTEM_PROMPT
+from repository.skill import SkillBundle
+from utils.agent.loop import AgentLoop
+from utils.agent.prompts import EVOLUTION_AGENT_SYSTEM_PROMPT
+from utils.colors import C
+from utils.executor.sandbox import Sandbox
 from utils.llm.client import LLMClient
 from utils.llm.types import Message
 
@@ -15,183 +18,162 @@ logger = logging.getLogger(__name__)
 class SkillGenerator:
     """Skill Generator πθ (§3.3 Eq.7).
 
-    Maintains a persistent conversation context C and iteratively
-    generates/refines skill bundles S based on verification feedback F.
+    Uses an AgentLoop in the sandbox to generate, execute, and refine skill
+    bundles. The AgentLoop runs the EVOLUTION_AGENT_SYSTEM_PROMPT (P1-P6)
+    workflow — creating skills, executing them, and learning from terminal
+    output including import errors, API timeouts, and runtime failures.
 
-    Per Algorithm 1:
-      S(i)  ∼ πθ(·|C)            initial generation
-      S(i+1) ∼ πθ(·|C ⊕ F)       refinement with feedback
+    This unifies the Generator and Executor into a single AgentLoop session,
+    matching the paper's design where the Evolution Agent has full sandbox
+    access for both skill creation and execution.
     """
 
-    def __init__(self, client: LLMClient, meta_skill: str = ""):
+    def __init__(self, client: LLMClient, meta_skill: str = "", max_turns: int = 20):
         self.client = client
         self.meta_skill = meta_skill
-        self.context: list[Message] = []
-        self._token_count: int = 0
+        self.max_turns = max_turns
+        self._agent_loop: AgentLoop | None = None
+        self._skill_loader: Callable[[str], str | None] | None = None
 
-    def init_context(self, instruction: str, previous_skill: SkillBundle | None = None,
-                     env_context: str = "") -> None:
-        """Initialize the conversation context C.
+    def set_skill_loader(self, loader: Callable[[str], str | None]) -> None:
+        self._skill_loader = loader
 
-        C is initialized as (I, S_meta) per the paper (§3.3).
-        If previous_skill is provided, it's included for version tracking.
-        If env_context is provided, environment files and dependencies are injected.
+    def generate_and_execute(
+        self,
+        instruction: str,
+        sandbox: Sandbox,
+        env_context: str = "",
+        installed_tools: str = "",
+        feedback: str | None = None,
+    ) -> tuple[SkillBundle | None, dict[str, str]]:
+        """Generate/refine skill and execute it in the sandbox.
+
+        Initial call creates the AgentLoop and produces S(0) + x(0).
+        Subsequent calls with feedback refine S in the existing conversation.
+
+        Returns (skill_bundle, outputs) where outputs is {relative_path: content}.
         """
-        self.context = []
-
-        task_block = f"Task Description:\n{instruction}"
-        if self.meta_skill:
-            task_block = f"{self.meta_skill}\n\n---\n\n{task_block}"
-
-        self.context.append(Message.user(task_block))
-
-        if previous_skill:
-            self.context.append(Message.user(
-                "Previous evolved skill (load and improve):\n\n"
-                f"{serialize_skill(previous_skill)}"
-            ))
-
-        if env_context:
-            self.context.append(Message.user(
-                f"Environment files and available context for this task:\n\n{env_context}"
-            ))
-
-    def generate(self, instruction: str, feedback: str | None = None) -> SkillBundle | None:
-        """Generate or refine a skill bundle.
-
-        Args:
-            instruction: Task instruction I.
-            feedback: Failure diagnostic F(i,j) from Surrogate Verifier.
-                None on initial generation.
-
-        Returns:
-            SkillBundle or None if generation fails.
-        """
-        if not self.context:
-            self.init_context(instruction)
+        if self._agent_loop is None:
+            self._agent_loop = AgentLoop(
+                client=self.client,
+                sandbox=sandbox,
+                system_prompt=EVOLUTION_AGENT_SYSTEM_PROMPT,
+                max_turns=self.max_turns,
+                command_timeout=120,
+            )
+            if self._skill_loader:
+                self._agent_loop.set_skill_loader(self._skill_loader)
+            self._agent_loop.init_context(
+                instruction,
+                meta_skill=self.meta_skill,
+                env_files=env_context,
+                installed_tools=installed_tools,
+            )
+            print(f"  {C.cyan('GENERATOR')} | AgentLoop initialized")
 
         if feedback:
-            self.context.append(Message.user(
-                f"Host verifier found failures in the previous attempt. "
-                f"Fix your skill to address these issues:\n\n{feedback}"
+            self._agent_loop._messages.append(Message.user(
+                f"Host verifier found failures in the previous skill execution. "
+                f"Fix the evo-* skill to address these issues, then re-execute "
+                f"to produce output files. Here is the diagnostic:\n\n{feedback}"
             ))
+            self._agent_loop._estimated_tokens += len(feedback) // 4
 
-        messages = list(self.context)
-        response = self.client.send(
-            messages=messages,
-            system=GENERATOR_SYSTEM_PROMPT,
-            temperature=0.0,
-            max_tokens=8192,
-        )
+        print(f"  {C.cyan('GENERATOR')} | Running AgentLoop (max {self.max_turns} turns)...")
+        self._agent_loop.run_loop(instruction)
 
-        self.context.append(response.message)
-        self._token_count += response.usage.input_tokens + response.usage.output_tokens
+        # Collect outputs from sandbox
+        outputs = _collect_outputs(sandbox)
+        print(f"  {C.cyan('GENERATOR')} | AgentLoop complete: {len(outputs)} files: {list(outputs.keys())[:5]}")
 
-        text = response.message.content or ""
-        logger.info("GENERATOR: response %d chars", len(text))
+        # Extract skill from sandbox
+        skill = _read_skill_from_sandbox(sandbox)
+        if skill:
+            print(f"  {C.cyan('GENERATOR')} | Skill '{skill.name}' found in sandbox")
+        else:
+            print(f"  {C.cyan('GENERATOR')} | No evo-* skill found in sandbox — using fallback")
+            skill = SkillBundle(name="evo-task", skillell="# Fallback skill\n")
 
-        return self.extract_skill(text)
-
-    def extract_skill(self, response_text: str) -> SkillBundle | None:
-        """Extract a SkillBundle from the generator's response.
-
-        The response is a markdown document with YAML frontmatter (SKILL.md)
-        and optional Python scripts in code blocks with filename=scripts/xxx.py.
-        """
-        skillell_content = _extract_yaml_block(response_text)
-        if not skillell_content:
-            logger.warning("GENERATOR: no YAML frontmatter found in response")
-            return None
-
-        skill = parse_skill_from_text(skillell_content)
-        if skill.name == "unnamed":
-            skill.metadata["name"] = "evo-task"
-
-        # Extract scripts from filename=scripts/xxx.py code blocks
-        scripts = _extract_script_blocks(response_text)
-        if scripts:
-            skill.scripts = scripts
-            logger.info("GENERATOR: extracted %d script files", len(scripts))
-
-        return skill
-
-    def append_feedback(self, feedback: str) -> None:
-        """Append failure diagnostic to the conversation context C (Eq.7)."""
-        self.context.append(Message.user(feedback))
+        return skill, outputs
 
     def append_oracle_signal(self, passed: bool) -> None:
-        """Append oracle pass/fail bit to context (no test content)."""
-        signal = "Ground-truth oracle: ALL TESTS PASSED." if passed else "Ground-truth oracle: TESTS FAILED. Escalate and improve."
-        self.context.append(Message.user(signal))
+        """Append oracle pass/fail bit to AgentLoop conversation context."""
+        if self._agent_loop is None:
+            return
+        signal = (
+            "Ground-truth oracle: ALL TESTS PASSED."
+            if passed
+            else "Ground-truth oracle: TESTS FAILED. Escalate and improve."
+        )
+        self._agent_loop._messages.append(Message.user(signal))
+        self._agent_loop._estimated_tokens += len(signal) // 4
 
     def context_usage_ratio(self) -> float:
         """Return estimated context window usage proportion."""
-        return min(self._token_count / 100000, 1.0)
+        if self._agent_loop:
+            return self._agent_loop.context_usage_ratio()
+        return 0.0
 
     @property
-    def conversation_history(self) -> str:
-        """Return the full conversation as a readable string."""
-        parts: list[str] = []
-        for msg in self.context:
-            role = msg.role.upper()
-            content = msg.content or ""
-            parts.append(f"[{role}]\n{content}")
-        return "\n\n".join(parts)
+    def persisted_context(self) -> bool:
+        """Whether the AgentLoop has been initialized (context persists)."""
+        return self._agent_loop is not None
 
 
-def _try_parse_json(text: str) -> dict | None:
-    """Try to extract and parse a JSON object from text."""
-    text = text.strip()
-
-    if text.startswith("{"):
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-
-    match = re.search(r"\{[\s\S]*\}", text)
-    if match:
-        try:
-            return json.loads(match.group())
-        except json.JSONDecodeError:
-            pass
-
-    return None
+def _collect_outputs(sandbox: Sandbox) -> dict[str, str]:
+    outputs: dict[str, str] = {}
+    for search_dir in ["/root", "/app"]:
+        ec, stdout, _ = sandbox.run(
+            f"find {search_dir} -maxdepth 1 \\( -type f -o -type l \\) 2>/dev/null",
+            timeout=10,
+        )
+        if ec == 0 and stdout:
+            for line in stdout.strip().split("\n"):
+                abspath = line.strip()
+                if abspath and "progress.md" not in abspath:
+                    content = sandbox.read_file(abspath)
+                    if content:
+                        outputs[abspath.lstrip("/")] = content
+    return outputs
 
 
-def _extract_code_block(text: str, lang: str) -> str | None:
-    """Extract content from a markdown code fence with the given language."""
-    pattern = rf"```{lang}\s*\n([\s\S]*?)```"
-    matches = re.findall(pattern, text)
-    if matches:
-        return matches[0].strip()
-    return None
+def _read_skill_from_sandbox(sandbox: Sandbox) -> SkillBundle | None:
+    ec, stdout, _ = sandbox.run(
+        "find /app/environment/skills -name 'SKILL.md' -path '*/evo-*' 2>/dev/null",
+        timeout=5,
+    )
+    if ec != 0 or not stdout:
+        return None
 
+    skillell_path = stdout.strip().split("\n")[0]
+    if not skillell_path:
+        return None
 
-def _extract_yaml_block(text: str) -> str | None:
-    """Extract content that starts with YAML frontmatter (--- ... ---)."""
-    match = re.search(r"---\s*\n([\s\S]*?)---\s*\n([\s\S]*)", text)
-    if match:
-        return f"---\n{match.group(1)}\n---\n{match.group(2)}"
-    return None
+    skillell = sandbox.read_file(skillell_path)
+    if not skillell:
+        return None
 
+    parts = Path(skillell_path).parts
+    skill_name = "evo-task"
+    for i, p in enumerate(parts):
+        if p == "skills" and i + 1 < len(parts):
+            skill_name = parts[i + 1]
+            break
 
-def _extract_script_blocks(text: str) -> dict[str, str]:
-    """Extract script files from filename=scripts/xxx.py code blocks.
-
-    The generator response uses this format:
-    ```python filename=scripts/utils.py
-    def func():
-        pass
-    ```
-
-    Returns dict of {relative_path: content}.
-    """
+    scripts_dir = str(Path(skillell_path).parent / "scripts")
+    ec2, out2, _ = sandbox.run(
+        f"find {scripts_dir} -type f -not -name '*.pyc' 2>/dev/null", timeout=5
+    )
     scripts: dict[str, str] = {}
-    pattern = r"```(?:python)?\s+filename=([^\s]+)\s*\n([\s\S]*?)```"
-    for match in re.finditer(pattern, text):
-        filepath = match.group(1).strip()
-        content = match.group(2).strip()
-        if filepath and content:
-            scripts[filepath] = content
-    return scripts
+    if ec2 == 0 and out2:
+        for script_path in out2.strip().split("\n"):
+            if not script_path.strip():
+                continue
+            try:
+                content = sandbox.read_file(script_path.strip())
+            except UnicodeDecodeError:
+                continue
+            if content:
+                scripts[str(Path(script_path.strip()).relative_to(scripts_dir))] = content
+
+    return SkillBundle(name=skill_name, skillell=skillell, scripts=scripts)

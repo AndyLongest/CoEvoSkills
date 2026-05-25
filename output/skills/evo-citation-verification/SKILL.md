@@ -1,3 +1,46 @@
+---
+name: evo-citation-verification
+---
+
+# Citation Verification
+
+## Overview
+
+Systematically verify the integrity of BibTeX citations by cross‑referencing each entry with the Crossref API. This skill detects fabricated or hallucinated citations—entries with non‑existent DOIs, mismatched titles, or malformed records—and provides a clean list of suspicious titles.
+
+## Workflow
+
+1. **Parse** the BibTeX file into individual entries.
+2. **Check DOI entries** – Query Crossref works endpoint. If the DOI returns 404, or if the returned title is very different from the given title, flag as fake.
+3. **Check entries without DOIs** – Optionally search by title. Because false positives are possible, only flag if a clear mismatch is found. (For high precision, manual cross‑checking is recommended for these.)
+4. **Handle malformed entries** – Entries that are incomplete (e.g., missing closing brace) are considered fake. If a title cannot be extracted, the entry is skipped.
+5. **Output** – Sorted list of titles of fake citations.
+
+## Functions
+
+### `verify_bibtex(filepath)`
+- **Input**: `filepath` – path to a `.bib` file (string).
+- **Output**: dictionary with key `"fake_citations"` containing an alphabetically sorted list of titles (strings) that are likely fake or hallucinated.
+- **Dependencies**: `requests`, `bibtexparser` (already installed).
+
+## Usage
+
+```python
+import sys
+sys.path.insert(0, '/app/environment/skills/evo-citation-verification/scripts')
+from verify_citations import verify_bibtex
+
+result = verify_bibtex('/root/test.bib')
+# result['fake_citations'] is a list of titles
+```
+
+## Notes
+
+- The Crossref API is free and does not require authentication. For large files, be mindful of rate limits (~50 requests per second).
+- Entries without DOIs are not automatically flagged to avoid false positives. Use the search functionality manually if high confidence is needed.
+- The script gracefully handles truncated or malformed BibTeX entries; they are flagged when possible.
+
+```python filename=scripts/verify_citations.py
 import re
 import requests
 import bibtexparser
@@ -143,3 +186,4 @@ def verify_bibtex(filepath):
     # Sort alphabetically
     sorted_titles = sorted(fake_titles)
     return {"fake_citations": sorted_titles}
+```

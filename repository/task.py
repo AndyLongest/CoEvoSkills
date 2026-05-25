@@ -61,6 +61,7 @@ def load_task(task_dir: str | Path) -> Task:
         data_files=_collect_files(env_dir / "data") if (env_dir / "data").exists() else {},
         doc_files=_collect_files(env_dir / "doc") if (env_dir / "doc").exists() else {},
         pre_installed_skills=_collect_skills(env_dir / "skills") if (env_dir / "skills").exists() else {},
+        root_files=_collect_root_files(env_dir),
         dockerfile=(env_dir / "Dockerfile").read_text() if (env_dir / "Dockerfile").exists() else "",
     )
 
@@ -100,6 +101,25 @@ def load_all_tasks(benchmark_dir: str | Path) -> list[Task]:
             tasks.append(load_task(task_dir))
 
     return tasks
+
+
+def _collect_root_files(env_dir: Path) -> dict[str, str]:
+    """Collect individual files from the environment root directory.
+
+    These are input files placed directly in environment/ (e.g., test.bib).
+    Excludes Dockerfile, directories, and already-collected subdirectories.
+    Returns dict of {filename: content}.
+    """
+    result: dict[str, str] = {}
+    if not env_dir.exists():
+        return result
+    for f in sorted(env_dir.iterdir()):
+        if f.is_file() and f.name != "Dockerfile":
+            try:
+                result[f.name] = f.read_text()
+            except UnicodeDecodeError:
+                continue
+    return result
 
 
 def _collect_files(dir_path: Path) -> dict[str, str]:

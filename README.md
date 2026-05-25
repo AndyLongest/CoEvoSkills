@@ -4,6 +4,8 @@ Reproduction of [CoEvoSkills: Self-Evolving Agent Skills via Co-Evolutionary Ver
 
 Agent skills self-evolve through a co-evolutionary loop: a **Skill Generator** creates multi-file skill bundles, a **Surrogate Verifier** independently tests them, and a **Ground-Truth Oracle** returns pass/fail signals. Evaluated on [SkillsBench](https://github.com/benchflow-ai/skillsbench) (94 tasks across 11 domains).
 
+> **Current config uses debug defaults (N=2, M=3). Override with `--n 5 --m 15` for paper-level budget.**
+
 ## Quick Start
 
 ```bash
@@ -13,14 +15,174 @@ source .venv/bin/activate
 # 2. Set your API key
 export DEEPSEEK_API_KEY=sk-xxx
 
-# 3. Sanity check — hello-world with flash model (~1-2 min)
-python scripts/evolve.py \
-  --tasks skillsbench/experiments/sanity-tasks/hello-world \
-  --model deepseek-v4-flash
+# 3. Run evolution on any task
+python scripts/evolve.py --tasks citation-check --model deepseek-v4-flash
 
-# 4. Run on a real task
-python scripts/evolve.py --tasks citation-check --model deepseek-v4-pro
+# Override evolution budget (paper: N=5, M=15)
+python scripts/evolve.py --tasks exoplanet-detection-period --n 5 --m 15
+
+# Run all 94 tasks (requires API quota)
+python scripts/evolve.py
 ```
+
+## Available Tasks
+
+All tasks can be run with `--tasks <name>`. The `--tasks` flag accepts a task name
+(e.g., `citation-check`) or `all` for the full benchmark. See `skillsbench/tasks/` for details.
+
+<!-- start task-table -->
+
+<details>
+<summary><strong>cybersecurity</strong> (7 tasks)</summary>
+
+| Task | Description |
+|------|-------------|
+| `dapt-intrusion-detection` | Network Intrusion Detection |
+| `fix-druid-loophole-cve` | Vulnerability Analysis |
+| `fix-erlang-ssh-cve` | Vulnerability Analysis |
+| `setup-fuzzing-py` | Fuzzing |
+| `software-dependency-audit` | Vulnerability Analysis |
+| `suricata-custom-exfil` | Intrusion Detection |
+| `syzkaller-ppdev-syzlang` | Fuzzing |
+</details>
+
+<details>
+<summary><strong>finance-economics</strong> (9 tasks)</summary>
+
+| Task | Description |
+|------|-------------|
+| `econ-detrending-correlation` | Macroeconomic Time Series |
+| `financial-modeling-qa` | Financial Modeling |
+| `invoice-fraud-detection` | Fraud Detection |
+| `reserves-at-risk-calc` | Risk Analysis |
+| `sec-financial-report` | Sec Filings Analysis |
+| `shock-analysis-demand` | Macroeconomic Analysis |
+| `shock-analysis-supply` | Macroeconomic Analysis |
+| `weighted-gdp-calc` | Macroeconomic Analysis |
+| `xlsx-recover-data` | Financial Modeling |
+</details>
+
+<details>
+<summary><strong>industrial-physical-systems</strong> (14 tasks)</summary>
+
+| Task | Description |
+|------|-------------|
+| `3d-scan-calc` | 3D Printing Mass Calculation |
+| `ada-bathroom-plan-repair` | Architectural Design |
+| `adaptive-cruise-control` | Vehicle Control |
+| `drone-planning-control` | Robot Control |
+| `dynamic-object-aware-egomotion` | Egomotion / Dynamic Object Segmentation |
+| `energy-ac-optimal-power-flow` | AC Optimal Power Flow |
+| `energy-market-pricing` | Electricity Market Pricing |
+| `energy-unit-commitment` | Unit Commitment |
+| `grid-dispatch-operator` | Grid Dispatch |
+| `hvac-control` | Control Systems |
+| `manufacturing-codebook-normalization` | Defect Analysis |
+| `manufacturing-equipment-maintenance` | Maintenance |
+| `manufacturing-fjsp-optimization` | Production Scheduling |
+| `r2r-mpc-control` | Control Systems |
+</details>
+
+<details>
+<summary><strong>mathematics-or-formal-reasoning</strong> (8 tasks)</summary>
+
+| Task | Description |
+|------|-------------|
+| `bike-rebalance` | Vehicle Routing |
+| `civ6-adjacency-optimizer` | Combinatorial Optimization |
+| `exam-block-sequencing` | Mathematical Optimization |
+| `lean4-proof` | Formal Proof |
+| `paratransit-routing` | Mathematical Optimization |
+| `pddl-airport-planning` | Formal Planning |
+| `pddl-tpp-planning` | Formal Planning |
+| `travel-planning` | Calendar Scheduling |
+</details>
+
+<details>
+<summary><strong>media-content-production</strong> (9 tasks)</summary>
+
+| Task | Description |
+|------|-------------|
+| `mario-coin-counting` | Video Processing |
+| `multilingual-video-dubbing` | Video Processing |
+| `pedestrian-traffic-counting` | Video Processing |
+| `pg-essay-to-audiobook` | Audio Processing |
+| `threejs-structure-parser` | 3D Content |
+| `threejs-to-obj` | 3D Content |
+| `video-filler-word-remover` | Video Processing |
+| `video-silence-remover` | Video Processing |
+| `video-tutorial-indexer` | Video Processing |
+</details>
+
+<details>
+<summary><strong>natural-science</strong> (15 tasks)</summary>
+
+| Task | Description |
+|------|-------------|
+| `crystallographic-wyckoff-position-analysis` | Crystallography |
+| `earthquake-phase-association` | Seismology |
+| `earthquake-plate-calculation` | Geophysics Plate Tectonics |
+| `exoplanet-detection-period` | Astronomy |
+| `find-topk-similiar-chemicals` | Chemistry |
+| `flood-risk-analysis` | Hydrology |
+| `glm-lake-mendota` | Hydrology |
+| `gravitational-wave-detection` | Astronomy |
+| `lab-unit-harmonization` | Lab Unit Harmonization |
+| `lake-warming-attribution` | Hydrology |
+| `mars-clouds-clustering` | Astronomy |
+| `protein-expression-analysis` | Protein Expression |
+| `quantum-numerical-simulation` | Quantum Simulation |
+| `radar-vital-signs` | Biomedical Analysis |
+| `seismic-phase-picking` | Seismology |
+</details>
+
+<details>
+<summary><strong>office-white-collar</strong> (15 tasks)</summary>
+
+| Task | Description |
+|------|-------------|
+| `citation-check` | Academic Bibliography Verification |
+| `court-form-filling` | Legal Form Filling |
+| `edit-pdf` | PDF Editing |
+| `enterprise-information-search` | Business Reporting |
+| `exceltable-in-ppt` | Presentation Editing |
+| `jpg-ocr-stat` | OCR |
+| `latex-formula-extraction` | PDF Formula Extraction |
+| `offer-letter-generator` | Document Editing |
+| `organize-messy-files` | Document Classification |
+| `paper-anonymizer` | Document Editing |
+| `pdf-excel-diff` | Spreadsheet Workflow |
+| `powerlifting-coef-calc` | Spreadsheet Workflow |
+| `pptx-reference-formatting` | Presentation Editing |
+| `sales-pivot-analysis` | Spreadsheet Workflow |
+| `taxonomy-tree-merge` | Business Reporting |
+</details>
+
+<details>
+<summary><strong>software-engineering</strong> (17 tasks)</summary>
+
+| Task | Description |
+|------|-------------|
+| `azure-bgp-oscillation-route-leak` | Network Engineering |
+| `data-to-d3` | Data Visualization Frontend |
+| `debug-trl-grpo` | Debugging |
+| `dialogue-parser` | Parser Implementation |
+| `fix-build-agentops` | Build Repair |
+| `fix-build-google-auto` | Build Repair |
+| `fix-visual-stability` | Performance Optimization |
+| `flink-query` | Implementation |
+| `gh-repo-analytics` | Repo Analysis |
+| `jax-computing-basics` | Library API Usage |
+| `llm-prefix-cache-replay` | Performance Optimization |
+| `parallel-tfidf-search` | Performance Optimization |
+| `python-scala-translation` | Code Translation |
+| `react-performance-debugging` | Performance Optimization |
+| `simpo-code-reproduction` | Paper to Code Reproduction |
+| `spring-boot-jakarta-migration` | Migration |
+| `tictoc-unnecessary-abort-detection` | Concurrency Control |
+</details>
+
+<!-- end task-table -->
 
 ## Prerequisites
 
@@ -154,8 +316,8 @@ All key parameters from the paper are in `configs/default.yaml`:
 
 ```yaml
 evolution:
-  n: 5       # Max oracle interventions (N)
-  m: 15      # Max surrogate retries (M)
+  n: 2       # Max oracle interventions (paper: 5)
+  m: 3       # Max surrogate retries (paper: 15)
   beta: 0.7  # Context usage cap (β)
 
 timeout:

@@ -11,8 +11,8 @@ from layers.surrogate_verifier.verifier import SurrogateVerifier
 from repository.skill import SkillBundle, write_skill
 from repository.store import ArtifactStore
 from repository.task import Task
+from utils.colors import C
 from utils.config import Config
-from utils.executor.executor import Executor
 from utils.executor.sandbox import Sandbox
 from utils.llm.client import LLMClient
 
@@ -69,15 +69,15 @@ def run_evolution(
     V: list[str] = []
 
     store.write_log(task.name, f"Starting evolution: N={config.evolution.n}, M={config.evolution.m}, β={config.evolution.beta}")
-    print(f"\n{'='*60}")
-    print(f"EVOLVE: {task.name}  |  N={config.evolution.n}, M={config.evolution.m}")
-    print(f"{'='*60}")
+    print(f"\n{C.header(f'EVOLVE: {task.name}  |  N={config.evolution.n}, M={config.evolution.m}')}")
+    print(f"{C.header('=' * 60)}")
 
     sandbox = Sandbox()
     sandbox.setup(install_deps=_extract_deps_from_task(task))
 
     generator = SkillGenerator(client=client, meta_skill=meta_skill)
-    executor = Executor(client=client, max_turns=10, beta=config.evolution.beta)
+    if skill_loader:
+        generator.set_skill_loader(skill_loader)
 
     try:
         task.environment.prepare_sandbox(sandbox)
@@ -85,55 +85,57 @@ def run_evolution(
         # Build environment context for the Generator
         env_context = _build_environment_context(task)
         if env_context:
-            generator.init_context(task.instruction, env_context=env_context)
             store.write_log(task.name, "Environment context injected into generator")
 
-        # === 1. Generate initial skill S(0) ∼ πθ(·|C) ===
-        print("  GENERATOR | Generating initial skill...")
-        S = generator.generate(task.instruction)
+        # === 1. Generate initial skill S(0) and execute: x(0) = Φ(S(0), E) ===
+        print(f"  {C.cyan('GENERATOR')} | Generating initial skill and executing...")
+        S, outputs = generator.generate_and_execute(
+            task.instruction, sandbox, env_context=env_context,
+            installed_tools=_get_installed_tools(sandbox),
+        )
         if S is None:
             S = SkillBundle(name=f"evo-{task.name}", skillell="# Initial skill\n")
         S_best = S
         store.write_log(task.name, f"Initial skill: {S.name}")
         write_skill(S, skill_dir)
-        print(f"  GENERATOR | Skill '{S.name}' generated")
+        print(f"  {C.cyan('GENERATOR')} | Skill '{S.name}' generated, {len(outputs)} output files")
 
         while n < config.evolution.n and r < config.evolution.m:
             metrics.rounds += 1
             round_record: dict = {"round": metrics.rounds, "n": n, "r": r}
             store.write_log(task.name, f"Round {metrics.rounds}: n={n}, r={r}")
-            print(f"\n─── ROUND {metrics.rounds} ───  n={n}/{config.evolution.n} oracle  r={r}/{config.evolution.m} surrogate")
+            print(f"\n{C.bold(C.yellow(f'─── ROUND {metrics.rounds} ───  n={n}/{config.evolution.n} oracle  r={r}/{config.evolution.m} surrogate'))}")
 
-            # === 2. Execute skill in sandbox: x(i) ← Φ(S(i), E) ===
-            store.write_log(task.name, "Phase: executor")
-            print("  EXECUTOR  | Running skill...")
-            outputs = executor.execute(S, sandbox, task.instruction, skill_loader=skill_loader)
+            # === 2. Execute was already done by Generator AgentLoop ===
             round_record["output_count"] = len(outputs)
             store.write_log(task.name,
-                f"Executor complete: {len(outputs)} files: {list(outputs.keys())[:5]}")
-            print(f"  EXECUTOR  | {len(outputs)} files produced")
+                f"Generator complete: {len(outputs)} files: {list(outputs.keys())[:5]}")
+            print(f"  {C.cyan('GENERATOR')} | {len(outputs)} files produced")
 
             # === 3. Surrogate Verifier: R̃(i,j) ← evaluate(x(i), V(j)) ===
             store.write_log(task.name, "Phase: verifier")
-            print(f"  VERIFIER  | Evaluating {len(outputs)} files with {len(V)} tests...")
+            print(f"  {C.yellow('VERIFIER')}  | Evaluating {len(outputs)} files with {len(V)} tests...")
             r_tilde, feedback, V = verifier.evaluate(task.instruction, outputs, V)
             round_record["r_tilde"] = r_tilde
             store.write_log(task.name,
                 f"Surrogate R̃ = {r_tilde:.2f}, tests={len(V)}, outputs={len(outputs)}")
-            print(f"  VERIFIER  | R̃ = {r_tilde:.2f}")
+            print(f"  {C.yellow('VERIFIER')}  | R̃ = {r_tilde:.2f}")
 
             # === 4. If R̃ < 1: refine skill and retry ===
             if r_tilde < 1.0:
                 if feedback:
-                    generator.append_feedback(feedback.to_context_str())
                     store.write_log(task.name,
                         f"Verifier feedback: {feedback.root_cause_analysis[:100]}...")
-                    print("  GENERATOR | Refining skill with feedback...")
-                    S = generator.generate(task.instruction, feedback=feedback.to_context_str())
+                    print(f"  {C.cyan('GENERATOR')} | Refining skill and re-executing...")
+                    S, outputs = generator.generate_and_execute(
+                        task.instruction, sandbox,
+                        feedback=feedback.to_context_str(),
+                    )
                     if S is None:
                         S = SkillBundle(name=f"evo-{task.name}", skillell="# Fallback skill\n")
                     S_best = S
                     write_skill(S, skill_dir)
+                    print(f"  {C.cyan('GENERATOR')} | Skill '{S.name}' refined")
 
                 round_record["exit"] = "verifier_fail"
                 metrics.history.append(round_record)
@@ -143,13 +145,14 @@ def run_evolution(
 
             # === 5. Ground-Truth Oracle: R(i) ← oracle(x̂(i)) ===
             store.write_log(task.name, "Phase: oracle")
-            print("  ORACLE    | Running skill in fresh sandbox...")
+            print(f"  {C.red('ORACLE')}    | Running skill in fresh sandbox...")
             oracle_r, oracle_score = oracle.evaluate(S, task, client, deps=_extract_deps_from_task(task))
             n += 1
             metrics.oracle_calls += 1
             round_record["oracle_reward"] = oracle_r
             store.write_log(task.name, f"Oracle R = {oracle_r}")
-            print(f"  ORACLE    | R = {oracle_r}")
+            oracle_color = C.green if oracle_r == 1 else C.red
+            print(f"  {oracle_color('ORACLE')}    | R = {oracle_color(str(oracle_r))}")
 
             if oracle_r == 1:
                 S_best = S
@@ -159,9 +162,9 @@ def run_evolution(
                 round_record["exit"] = "success"
                 metrics.history.append(round_record)
                 store.write_log(task.name, "CONVERGED: R=1")
-                print(f"\n{'='*60}")
-                print("  ✓ CONVERGED  |  Reward = 1.0")
-                print(f"{'='*60}\n")
+                print(f"\n{C.success('=' * 60)}")
+                print(f"  {C.success('✓ CONVERGED  |  Reward = 1.0')}")
+                print(f"{C.success('=' * 60)}\n")
                 break
             elif oracle_score > R_best:
                 R_best = oracle_score
@@ -180,7 +183,7 @@ def run_evolution(
     except Exception as e:
         metrics.error = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
         store.write_log(task.name, f"Error: {metrics.error}")
-        print(f"  ERROR: {metrics.error[:200]}")
+        print(f"  {C.fail('ERROR')}: {metrics.error[:200]}")
     finally:
         sandbox.cleanup()
 

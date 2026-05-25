@@ -1,6 +1,6 @@
 [
   {
-    "task": "hello-world",
+    "task": "citation-check",
     "converged": true,
     "reward": 0.0,
     "best_reward": 1.0,

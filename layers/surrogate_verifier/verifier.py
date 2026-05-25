@@ -5,6 +5,7 @@ import logging
 from layers.surrogate_verifier.feedback import Feedback, PerAssertionResult
 from layers.surrogate_verifier.test_generator import TestGenerator
 from layers.surrogate_verifier.test_runner import TestRunner
+from utils.colors import C
 from utils.llm.client import LLMClient
 from utils.llm.types import Message
 
@@ -76,7 +77,7 @@ class SurrogateVerifier:
             logger.info("VERIFIER: generated %d tests:", len(test_suite))
             for i, t in enumerate(test_suite):
                 logger.info("  TEST[%d]: %s", i, t[:200])
-            print(f"  VERIFIER  | {len(test_suite)} tests generated")
+            print(f"  {C.yellow('VERIFIER')}  | {len(test_suite)} tests generated")
 
         r_tilde, results = self.test_runner.run(test_suite, outputs)
         logger.info("Test run: R̃=%.2f, %d/%d passed", r_tilde,

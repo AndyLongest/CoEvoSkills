@@ -11,8 +11,8 @@ class Environment:
     """A task execution environment.
 
     Loaded from a SkillsBench task directory, this captures:
-      - Input data files (from environment/data/ or environment/ root)
-      - Reference documents (from environment/doc/)
+      - Input data files (from environment/data/, environment/ root, environment/doc/)
+      - Reference documents
       - Pre-installed skills (from environment/skills/)
       - Dockerfile for building the container
     """
@@ -23,6 +23,7 @@ class Environment:
     data_files: dict[str, str] = field(default_factory=dict)
     doc_files: dict[str, str] = field(default_factory=dict)
     pre_installed_skills: dict[str, str] = field(default_factory=dict)
+    root_files: dict[str, str] = field(default_factory=dict)
     dockerfile: str = ""
 
     def prepare_sandbox(self, sandbox: Sandbox) -> None:
@@ -41,6 +42,9 @@ class Environment:
 
         for rel_path, content in self.pre_installed_skills.items():
             sandbox.write_file(f"/app/environment/skills/{rel_path}", content)
+
+        for filename, content in self.root_files.items():
+            sandbox.write_file(f"/root/{filename}", content)
 
     def install_skill(self, sandbox: Sandbox, skill_name: str, skill_bundle) -> None:
         """Install an evolved skill into the sandbox environment.
