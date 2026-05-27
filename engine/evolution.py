@@ -149,12 +149,14 @@ def run_evolution(
             # === 3. Surrogate Verifier: R̃(i,j) ← evaluate(x(i), V(j)) ===
             store.write_log(task.name, "Phase: verifier")
 
-            # Merge input data files so the Verifier can independently read
-            # them and compute expected values for content-level tests.
-            # Data files live at /root/data/ (per task instruction convention).
+            # Merge input data files (from data/ and environment root) so the
+            # Verifier can independently read them and compute expected values
+            # for content-level tests, regardless of whether the agent touched them.
             verifier_outputs = dict(outputs)
             for data_path, content in task.environment.data_files.items():
                 verifier_outputs[f"root/data/{data_path}"] = content
+            for filename, content in task.environment.root_files.items():
+                verifier_outputs[f"root/{filename}"] = content
 
             print(f"  {C.yellow('VERIFIER')}  | Evaluating {len(verifier_outputs)} files ({len(outputs)} agent + {len(task.environment.data_files)} data) with {len(V)} tests...")
             r_tilde, feedback, V = verifier.evaluate(instruction, verifier_outputs, V)
@@ -179,25 +181,32 @@ def run_evolution(
             # === 5. Ground-Truth Oracle: R(i) ← oracle(x̂(i)) ===
             store.write_log(task.name, "Phase: oracle")
             print(f"  {C.red('ORACLE')}    | Running skill in fresh sandbox...")
-            oracle_r, oracle_score = oracle.evaluate(S, task, client, deps=_extract_deps_from_task(task))
+            partial_credit = config.oracle.partial_credit
+            converge_threshold = config.oracle.converge_threshold
+            oracle_r, oracle_score = oracle.evaluate(
+                S, task, client,
+                deps=_extract_deps_from_task(task),
+                partial_credit=partial_credit,
+            )
             n += 1
             metrics.oracle_calls += 1
-            round_record["oracle_reward"] = oracle_r
-            store.write_log(task.name, f"Oracle R = {oracle_r}")
-            oracle_color = C.green if oracle_r == 1 else C.red
-            print(f"  {oracle_color('ORACLE')}    | R = {oracle_color(str(oracle_r))}")
+            round_record["oracle_reward"] = oracle_score
+            store.write_log(task.name,
+                f"Oracle R={oracle_r} score={oracle_score:.4f}")
+            oracle_color = C.green if oracle_score >= converge_threshold else C.red
+            print(f"  {oracle_color('ORACLE')}    | R={oracle_r}  score={oracle_color(f'{oracle_score:.4f}')}  (threshold={converge_threshold})")
 
-            if oracle_r == 1:
+            if oracle_score >= converge_threshold:
                 S_best = S
-                R_best = 1.0
-                metrics.final_reward = 1.0
-                metrics.best_reward = 1.0
+                R_best = oracle_score
+                metrics.final_reward = oracle_score
+                metrics.best_reward = oracle_score
                 metrics.converged = True
                 round_record["exit"] = "success"
                 metrics.history.append(round_record)
-                store.write_log(task.name, "CONVERGED: R=1")
+                store.write_log(task.name, f"CONVERGED: score={oracle_score}")
                 print(f"\n{C.success('=' * 60)}")
-                print(f"  {C.success('✓ CONVERGED  |  Reward = 1.0')}")
+                print(f"  {C.success(f'✓ CONVERGED  |  Oracle Score = {oracle_score:.4f}')}")
                 print(f"{C.success('=' * 60)}\n")
                 break
             elif oracle_score > R_best:
@@ -207,7 +216,7 @@ def run_evolution(
             metrics.best_reward = R_best
 
             # === 6. Co-evolution: escalate verifier tests V(j+1) ===
-            generator.append_oracle_signal(False)
+            generator.append_oracle_signal(oracle_score)
             V = verifier.escalate(instruction, outputs, V)
             round_record["exit"] = "oracle_fail_escalate"
             round_record["V_size"] = len(V)
@@ -232,6 +241,10 @@ def run_evolution(
 def _collect_outputs(sandbox: Sandbox) -> dict[str, str]:
     """Collect output files produced by the agent in /root/ and /app/.
 
+    Searches up to depth 3 to catch files the agent extracts into
+    subdirectories (e.g., TSV files from zip archives). Excludes
+    virtual environments and cache directories.
+
     Returns paths relative to workspace root (no leading /) so the verifier's
     test runner can materialize them inside its temp dir and run assertions
     with os.chdir().
@@ -239,14 +252,16 @@ def _collect_outputs(sandbox: Sandbox) -> dict[str, str]:
     outputs: dict[str, str] = {}
     for search_dir in ["/root", "/app"]:
         exit_code, stdout, _ = sandbox.run(
-            f"find {search_dir} -maxdepth 1 -type f 2>/dev/null", timeout=10
+            f"find {search_dir} -maxdepth 3 -type f "
+            f"-not -path '*/.venv/*' -not -path '*/__pycache__/*' 2>/dev/null",
+            timeout=30,
         )
         if exit_code == 0 and stdout:
             for line in stdout.strip().split("\n"):
                 abspath = line.strip()
                 if abspath and "progress.md" not in abspath:
                     content = sandbox.read_file(abspath)
-                    if content:
+                    if content is not None and (content or sandbox.file_exists(abspath)):
                         relpath = abspath.lstrip("/")
                         outputs[relpath] = content
     if not outputs:
@@ -257,7 +272,7 @@ def _collect_outputs(sandbox: Sandbox) -> dict[str, str]:
                 path = line.strip()
                 if path and "progress.md" not in path:
                     content = sandbox.read_file(path)
-                    if content:
+                    if content is not None and (content or sandbox.file_exists(path)):
                         outputs[path.replace("./", "")] = content
     return outputs
 

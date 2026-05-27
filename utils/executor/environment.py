@@ -26,6 +26,15 @@ class Environment:
     root_files: dict[str, str] = field(default_factory=dict)
     dockerfile: str = ""
 
+    @staticmethod
+    def _write_with_decoded(sandbox: Sandbox, path: str, content: str) -> None:
+        """Write content, decoding base64 if marked."""
+        if content.startswith("__B64__"):
+            import base64
+            sandbox.write_binary(path, base64.b64decode(content[7:]))
+        else:
+            sandbox.write_file(path, content)
+
     def prepare_sandbox(self, sandbox: Sandbox) -> None:
         """Populate a sandbox with the task environment files.
 
@@ -35,7 +44,7 @@ class Environment:
         """
 
         for rel_path, content in self.data_files.items():
-            sandbox.write_file(f"/app/environment/{rel_path}", content)
+            self._write_with_decoded(sandbox, f"/app/environment/{rel_path}", content)
 
         for rel_path, content in self.doc_files.items():
             sandbox.write_file(f"/app/environment/doc/{rel_path}", content)
@@ -44,7 +53,7 @@ class Environment:
             sandbox.write_file(f"/app/environment/skills/{rel_path}", content)
 
         for filename, content in self.root_files.items():
-            sandbox.write_file(f"/root/{filename}", content)
+            self._write_with_decoded(sandbox, f"/root/{filename}", content)
 
     def install_skill(self, sandbox: Sandbox, skill_name: str, skill_bundle) -> None:
         """Install an evolved skill into the sandbox environment.

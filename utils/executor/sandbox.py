@@ -168,6 +168,14 @@ class Sandbox:
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content)
 
+    def write_binary(self, path: str, content: bytes) -> None:
+        if not self._initialized:
+            self.setup()
+
+        full_path = self._workspace / path.lstrip("/")
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path.write_bytes(content)
+
     def read_file(self, path: str) -> str:
         if not self._initialized:
             self.setup()

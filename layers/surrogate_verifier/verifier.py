@@ -149,7 +149,8 @@ Analyze these failures. Provide:
    the cause, say "Cannot determine from test results" and describe
    what correct output should contain.
 2. Actionable revision suggestions: what should the agent change to pass?
-   Describe WHAT output is expected, not HOW to produce it.
+    Describe WHAT output is expected and MAY include HOW to produce it
+    (specific algorithms, libraries, or pre-installed skills to use when appropriate).
 
 Respond in JSON format:
 {{"root_cause_analysis": "...", "revision_suggestions": ["...", "..."]}}

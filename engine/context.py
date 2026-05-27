@@ -43,14 +43,17 @@ class ContextManager:
         feedback_str = feedback.to_context_str() if hasattr(feedback, "to_context_str") else str(feedback)
         self.append(Message.user(feedback_str))
 
-    def append_oracle_signal(self, passed: bool) -> None:
-        """Append oracle pass/fail bit (no test content revealed)."""
-        signal = (
-            "Ground-truth oracle: ALL TESTS PASSED. Skill is ready for deployment."
-            if passed
-            else "Ground-truth oracle: TESTS FAILED. The verifier's tests were insufficient. "
-            "The verifier must escalate its test suite to catch the remaining issues."
-        )
+    def append_oracle_signal(self, score: float) -> None:
+        """Append oracle score (no test content revealed)."""
+        if score >= 1.0:
+            signal = "Ground-truth oracle: ALL TESTS PASSED. Skill is ready for deployment."
+        elif score > 0.0:
+            signal = (
+                f"Ground-truth oracle: {score * 100:.1f}% of tests passed. "
+                f"The verifier must escalate its test suite to catch remaining issues."
+            )
+        else:
+            signal = "Ground-truth oracle: ALL TESTS FAILED. The verifier's tests were insufficient."
         self.append(Message.user(signal))
 
     @property

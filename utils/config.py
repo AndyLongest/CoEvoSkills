@@ -26,10 +26,17 @@ class WorkerConfig:
 
 
 @dataclass
+class OracleConfig:
+    partial_credit: bool = False
+    converge_threshold: float = 1.0
+
+
+@dataclass
 class Config:
     evolution: EvolutionConfig = field(default_factory=EvolutionConfig)
     timeout: TimeoutConfig = field(default_factory=TimeoutConfig)
     workers: WorkerConfig = field(default_factory=WorkerConfig)
+    oracle: OracleConfig = field(default_factory=OracleConfig)
     llm_model: str = "deepseek-v4-pro"
     verifier_model: str | None = None  # defaults to same as llm_model
     skillsbench_path: str = "./skillsbench"
@@ -44,11 +51,13 @@ def load_config(path: str | Path) -> Config:
     evolution = EvolutionConfig(**data.get("evolution", {}))
     timeout = TimeoutConfig(**data.get("timeout", {}))
     workers = WorkerConfig(**data.get("workers", {}))
+    oracle = OracleConfig(**data.get("oracle", {}))
 
     return Config(
         evolution=evolution,
         timeout=timeout,
         workers=workers,
+        oracle=oracle,
         llm_model=data.get("llm_model", "deepseek-v4-pro"),
         verifier_model=data.get("verifier_model"),
         skillsbench_path=data.get("skillsbench_path", "./skillsbench"),

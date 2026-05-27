@@ -96,15 +96,30 @@ class SkillGenerator:
 
         return skill, outputs
 
-    def append_oracle_signal(self, passed: bool) -> None:
-        """Append oracle pass/fail bit to AgentLoop conversation context."""
+    def append_oracle_signal(self, score: float) -> None:
+        """Append oracle score to AgentLoop conversation context.
+
+        score ∈ [0, 1]: fraction of ground-truth tests that passed.
+        Uses the score to give the agent directional feedback:
+          1.0   → "ALL TESTS PASSED. Converged."
+          0.75  → "9/12 tests passed (75.0%). The oracle detected issues."
+          0.0   → "ALL TESTS FAILED."
+        """
         if self._agent_loop is None:
             return
-        signal = (
-            "Ground-truth oracle: ALL TESTS PASSED."
-            if passed
-            else "Ground-truth oracle: TESTS FAILED. Escalate and improve."
-        )
+
+        if score >= 1.0:
+            signal = "Ground-truth oracle: ALL TESTS PASSED. Converged."
+        elif score > 0.0:
+            # Try to reconstruct passed/total from score for a more informative signal
+            pct = score * 100
+            signal = (
+                f"Ground-truth oracle: {pct:.1f}% of tests passed. "
+                f"The oracle detected remaining issues — escalate and improve."
+            )
+        else:
+            signal = "Ground-truth oracle: ALL TESTS FAILED. Escalate and improve."
+
         self._agent_loop._messages.append(Message.user(signal))
         self._agent_loop._estimated_tokens += len(signal) // 4
 
@@ -124,15 +139,18 @@ def _collect_outputs(sandbox: Sandbox) -> dict[str, str]:
     outputs: dict[str, str] = {}
     for search_dir in ["/root", "/app"]:
         ec, stdout, _ = sandbox.run(
-            f"find {search_dir} -maxdepth 1 \\( -type f -o -type l \\) 2>/dev/null",
-            timeout=10,
+            f"find {search_dir} -maxdepth 3 \\( -type f -o -type l \\) "
+            f"-not -path '*/.venv/*' -not -path '*/__pycache__/*' 2>/dev/null",
+            timeout=30,
         )
         if ec == 0 and stdout:
             for line in stdout.strip().split("\n"):
                 abspath = line.strip()
                 if abspath and "progress.md" not in abspath:
                     content = sandbox.read_file(abspath)
-                    if content:
+                    # Include file even if content is empty (e.g., binary xlsx)
+                    # as long as the file exists on disk.
+                    if content is not None and (content or sandbox.file_exists(abspath)):
                         outputs[abspath.lstrip("/")] = content
     return outputs
 

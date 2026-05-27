@@ -14,6 +14,10 @@ workers:
   evolve: 4   # parallel workers during evolution
   eval: 10    # parallel workers during evaluation
 
+oracle:
+  partial_credit: false     # when true, Oracle returns passed/total ratio instead of binary 0/1
+  converge_threshold: 1.0   # oracle_score >= this counts as converged
+
 # LLM model selection (overridable via CLI)
 llm_model: "deepseek-v4-pro"
 verifier_model: null  # defaults to same as llm_model

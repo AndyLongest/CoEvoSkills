@@ -108,8 +108,11 @@ def _collect_root_files(env_dir: Path) -> dict[str, str]:
 
     These are input files placed directly in environment/ (e.g., test.bib).
     Excludes Dockerfile, directories, and already-collected subdirectories.
+    Binary files are base64-encoded with a __B64__ marker.
     Returns dict of {filename: content}.
     """
+    import base64
+
     result: dict[str, str] = {}
     if not env_dir.exists():
         return result
@@ -118,15 +121,17 @@ def _collect_root_files(env_dir: Path) -> dict[str, str]:
             try:
                 result[f.name] = f.read_text()
             except UnicodeDecodeError:
-                continue
+                result[f.name] = "__B64__" + base64.b64encode(f.read_bytes()).decode()
     return result
 
 
 def _collect_files(dir_path: Path) -> dict[str, str]:
     """Collect all files recursively from a directory.
 
-    Returns dict of {relative_path: content}. Binary files are skipped.
+    Returns dict of {relative_path: content}. Binary files are base64-encoded.
     """
+    import base64
+
     result: dict[str, str] = {}
     if not dir_path.exists():
         return result
@@ -137,7 +142,8 @@ def _collect_files(dir_path: Path) -> dict[str, str]:
                 rel_path = str(f.relative_to(dir_path))
                 result[rel_path] = content
             except UnicodeDecodeError:
-                continue
+                rel_path = str(f.relative_to(dir_path))
+                result[rel_path] = "__B64__" + base64.b64encode(f.read_bytes()).decode()
     return result
 
 

@@ -52,6 +52,8 @@ def main():
     parser.add_argument("--parallel", default=None, type=int, help="Override parallel workers")
     parser.add_argument("--n", default=None, type=int, help="Override evolution N (max oracle interventions)")
     parser.add_argument("--m", default=None, type=int, help="Override evolution M (max surrogate retries)")
+    parser.add_argument("--partial-credit", action="store_true",
+                        help="Enable partial credit (Oracle returns passed/total ratio)")
     args = parser.parse_args()
 
     logger = setup_logger("coevo-evolve")
@@ -65,6 +67,8 @@ def main():
         config.evolution.n = args.n
     if args.m is not None:
         config.evolution.m = args.m
+    if args.partial_credit:
+        config.oracle.partial_credit = True
 
     output_dir = Path(args.output)
     store = ArtifactStore(output_dir)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from utils.colors import C
 from utils.llm.client import LLMClient
 from utils.llm.types import Message
 
@@ -170,7 +171,8 @@ Respond with a JSON list of strings.
         )
 
         tests = _parse_test_list(response.message.content or "")
-        return tests if tests else _generate_fallback_tests(instruction, outputs)
+        tests = tests if tests else _generate_fallback_tests(instruction, outputs)
+        return _inject_required_file_checks(instruction, tests, outputs)
 
     def escalate(
         self,
@@ -213,7 +215,27 @@ Current test suite (all passed):
         )
 
         new_tests = _parse_test_list(response.message.content or "")
-        return existing_suite + new_tests
+        if not new_tests:
+            print(f"  {C.red('ESCALATE')} | Parse failed (response preview: {(response.message.content or '')[:300]})")
+
+            # Retry once with stricter format instruction
+            retry_prompt = prompt + "\n\nFORMAT ERROR: Your previous response was not parseable. Return ONLY a JSON list of assertion code strings, nothing else before or after."
+            retry_response = self.client.send(
+                messages=[Message.user(retry_prompt)],
+                system=TEST_GEN_SYSTEM_PROMPT,
+                temperature=0.0,
+                max_tokens=4096,
+            )
+            new_tests = _parse_test_list(retry_response.message.content or "")
+
+            if not new_tests:
+                print(f"  {C.red('ESCALATE')} | Retry also failed, using fallback tests")
+                new_tests = _generate_fallback_tests(instruction, outputs)
+            else:
+                print(f"  {C.green('ESCALATE')} | Retry succeeded: {len(new_tests)} new tests")
+
+        combined = existing_suite + new_tests
+        return _inject_required_file_checks(instruction, combined, outputs)
 
 
 def _format_outputs(outputs: dict[str, str]) -> str:
@@ -241,11 +263,39 @@ def _parse_test_list(text: str) -> list[str]:
 
     match = re.search(r"\[[\s\S]*\]", text)
     if match:
+        block = match.group()
+        # Try JSON first
         try:
-            parsed = json.loads(match.group())
+            parsed = json.loads(block)
             if isinstance(parsed, list):
                 return [str(item) for item in parsed]
         except json.JSONDecodeError:
+            pass
+        # Try Python literal (handles single quotes, trailing commas)
+        try:
+            import ast
+            parsed = ast.literal_eval(block)
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+        except (ValueError, SyntaxError, MemoryError):
+            pass
+
+    # Try extracting from ```json, ```python, or bare ``` code blocks
+    cb_match = re.search(r"```(?:json|python)?\s*\n([\s\S]*?)```", text)
+    if cb_match:
+        block = cb_match.group(1).strip()
+        try:
+            parsed = json.loads(block)
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+        except json.JSONDecodeError:
+            pass
+        try:
+            import ast
+            parsed = ast.literal_eval(block)
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+        except (ValueError, SyntaxError, MemoryError):
             pass
 
     return _extract_python_blocks(text)
@@ -300,3 +350,46 @@ def _generate_fallback_tests(instruction: str, outputs: dict[str, str]) -> list[
         tests.append("assert False, 'No output files produced by the agent'")
 
     return tests
+
+
+def _inject_required_file_checks(
+    instruction: str,
+    tests: list[str],
+    outputs: dict[str, str],
+) -> list[str]:
+    """Inject existence checks for files the instruction explicitly requires.
+
+    Parses the task instruction for required output file paths (e.g., `/root/answers.json`)
+    and prepends an existence check if no existing test already covers that path.
+    This catches cases where the LLM-generated tests only check files the agent
+    happened to produce, missing files the task requires but the agent didn't create.
+    """
+    import os.path
+    import re
+
+    required: set[str] = set()
+
+    # Pattern 1: explicit absolute paths like /root/answers.json, /app/output/data.json
+    for m in re.finditer(r'/[\w/.-]+\.\w+', instruction):
+        path = m.group()
+        if path.startswith('/root/') or path.startswith('/app/'):
+            required.add(path.lstrip('/'))
+
+    # Pattern 2: "'answers.json' in /root" or '"answers.json" in /root folder'
+    for m in re.finditer("""['"`]?(\\w+\\.\\w+)['"`]?\\s+in\\s+['"`]?/root""", instruction, re.IGNORECASE):
+        required.add(f"root/{m.group(1)}")
+
+    if not required:
+        return tests
+
+    result = list(tests)
+    for relpath in sorted(required):
+        already_covered = any(
+            f"os.path.exists('{relpath}')" in t or f"Path('{relpath}').exists()" in t
+            for t in result
+        )
+        if not already_covered:
+            result.insert(0,
+                f"assert os.path.exists('{relpath}'), 'Required output file {relpath} missing'")
+
+    return result
