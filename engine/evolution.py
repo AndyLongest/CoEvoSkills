@@ -76,7 +76,9 @@ def run_evolution(
     S_best: SkillBundle | None = None
     V: list[str] = []
 
-    store.write_log(task.name, f"Starting evolution: N={config.evolution.n}, M={config.evolution.m}, β={config.evolution.beta}")
+    store.write_log(
+        task.name, f"Starting evolution: N={config.evolution.n}, M={config.evolution.m}, β={config.evolution.beta}"
+    )
     print(f"\n{C.header(f'EVOLVE: {task.name}  |  N={config.evolution.n}, M={config.evolution.m}')}")
     print(f"{C.header('=' * 60)}")
 
@@ -84,8 +86,10 @@ def run_evolution(
 
     _install_host_deps(deps)
 
-    sandbox = Sandbox()
+    sandbox = Sandbox(backend=config.sandbox.backend, image=config.sandbox.image)
     sandbox.setup(install_deps=deps)
+
+    available_skills = _build_available_skills(task)
 
     generator = SkillGenerator(client=client, meta_skill=meta_skill)
     if skill_loader:
@@ -97,11 +101,6 @@ def run_evolution(
             instruction = f"{instruction}\n\n{SKILL_DISCOVERY_HINT}"
         task.environment.prepare_sandbox(sandbox)
 
-        # Build environment context for the Generator
-        env_context = _build_environment_context(task)
-        if env_context:
-            store.write_log(task.name, "Environment context injected into generator")
-
         first_run = True
         pending_feedback: str | None = None
 
@@ -109,27 +108,34 @@ def run_evolution(
             metrics.rounds += 1
             round_record: dict = {"round": metrics.rounds, "n": n, "r": r}
             store.write_log(task.name, f"Round {metrics.rounds}: n={n}, r={r}")
-            print(f"\n{C.bold(C.yellow(f'─── ROUND {metrics.rounds} ───  n={n}/{config.evolution.n} oracle  r={r}/{config.evolution.m} surrogate'))}")
+            print(
+                f"\n{C.bold(C.yellow(f'─── ROUND {metrics.rounds} ───  n={n}/{config.evolution.n} oracle  r={r}/{config.evolution.m} surrogate'))}"
+            )
 
             # === 1. Execute skill: x(i) = Φ(S(i), E) (Alg. 1, line 7) ===
             if first_run:
                 print(f"  {C.cyan('GENERATOR')} | Generating initial skill and executing...")
                 S, outputs = generator.generate_and_execute(
-                    instruction, sandbox, env_context=env_context,
-                    installed_tools=_get_installed_tools(sandbox),
+                    instruction,
+                    sandbox,
+                    available_skills=available_skills,
                 )
                 first_run = False
             elif pending_feedback:
                 print(f"  {C.cyan('GENERATOR')} | Refining skill and re-executing...")
                 S, outputs = generator.generate_and_execute(
-                    instruction, sandbox,
+                    instruction,
+                    sandbox,
                     feedback=pending_feedback,
+                    available_skills=available_skills,
                 )
                 pending_feedback = None
             else:
                 print(f"  {C.cyan('GENERATOR')} | Executing current skill...")
                 S, outputs = generator.generate_and_execute(
-                    instruction, sandbox,
+                    instruction,
+                    sandbox,
+                    available_skills=available_skills,
                 )
 
             if S is None:
@@ -140,11 +146,25 @@ def run_evolution(
             write_skill(S, skill_dir)
             print(f"  {C.cyan('GENERATOR')} | Skill '{S.name}' generated, {len(outputs)} output files")
 
+            turn_summary = generator.get_turn_summary()
+            store.write_log(task.name, turn_summary)
+
             # === 2. Record execution outputs ===
             round_record["output_count"] = len(outputs)
-            store.write_log(task.name,
-                f"Generator complete: {len(outputs)} files: {list(outputs.keys())[:5]}")
+            store.write_log(task.name, f"Generator complete: {len(outputs)} files: {list(outputs.keys())[:5]}")
             print(f"  {C.cyan('GENERATOR')} | {len(outputs)} files produced")
+
+            # === 2a. β Context Overflow Check (Alg. 1, lines 9-11) ===
+            if generator.context_usage_ratio() > config.evolution.beta:
+                store.write_log(
+                    task.name, f"Context overflow: {generator.context_usage_ratio():.1%} > β={config.evolution.beta}"
+                )
+                print(
+                    f"  {C.yellow('CONTEXT')}  | {generator.context_usage_ratio():.1%} > β={config.evolution.beta} — breaking"
+                )
+                round_record["exit"] = "context_overflow"
+                metrics.history.append(round_record)
+                break
 
             # === 3. Surrogate Verifier: R̃(i,j) ← evaluate(x(i), V(j)) ===
             store.write_log(task.name, "Phase: verifier")
@@ -158,18 +178,18 @@ def run_evolution(
             for filename, content in task.environment.root_files.items():
                 verifier_outputs[f"root/{filename}"] = content
 
-            print(f"  {C.yellow('VERIFIER')}  | Evaluating {len(verifier_outputs)} files ({len(outputs)} agent + {len(task.environment.data_files)} data) with {len(V)} tests...")
+            print(
+                f"  {C.yellow('VERIFIER')}  | Evaluating {len(verifier_outputs)} files ({len(outputs)} agent + {len(task.environment.data_files)} data) with {len(V)} tests..."
+            )
             r_tilde, feedback, V = verifier.evaluate(instruction, verifier_outputs, V)
             round_record["r_tilde"] = r_tilde
-            store.write_log(task.name,
-                f"Surrogate R̃ = {r_tilde:.2f}, tests={len(V)}, outputs={len(outputs)}")
+            store.write_log(task.name, f"Surrogate R̃ = {r_tilde:.2f}, tests={len(V)}, outputs={len(outputs)}")
             print(f"  {C.yellow('VERIFIER')}  | R̃ = {r_tilde:.2f}")
 
             # === 4. If R̃ < 1: refine skill and retry ===
             if r_tilde < 1.0:
                 if feedback:
-                    store.write_log(task.name,
-                        f"Verifier feedback: {feedback.root_cause_analysis[:100]}...")
+                    store.write_log(task.name, f"Verifier feedback: {feedback.root_cause_analysis[:100]}...")
                     pending_feedback = feedback.to_context_str()
 
                 round_record["exit"] = "verifier_fail"
@@ -184,17 +204,22 @@ def run_evolution(
             partial_credit = config.oracle.partial_credit
             converge_threshold = config.oracle.converge_threshold
             oracle_r, oracle_score = oracle.evaluate(
-                S, task, client,
+                S,
+                task,
+                client,
                 deps=_extract_deps_from_task(task),
                 partial_credit=partial_credit,
+                sandbox_backend=config.sandbox.backend,
+                sandbox_image=config.sandbox.image,
             )
             n += 1
             metrics.oracle_calls += 1
             round_record["oracle_reward"] = oracle_score
-            store.write_log(task.name,
-                f"Oracle R={oracle_r} score={oracle_score:.4f}")
+            store.write_log(task.name, f"Oracle R={oracle_r} score={oracle_score:.4f}")
             oracle_color = C.green if oracle_score >= converge_threshold else C.red
-            print(f"  {oracle_color('ORACLE')}    | R={oracle_r}  score={oracle_color(f'{oracle_score:.4f}')}  (threshold={converge_threshold})")
+            print(
+                f"  {oracle_color('ORACLE')}    | R={oracle_r}  score={oracle_color(f'{oracle_score:.4f}')}  (threshold={converge_threshold})"
+            )
 
             if oracle_score >= converge_threshold:
                 S_best = S
@@ -252,8 +277,7 @@ def _collect_outputs(sandbox: Sandbox) -> dict[str, str]:
     outputs: dict[str, str] = {}
     for search_dir in ["/root", "/app"]:
         exit_code, stdout, _ = sandbox.run(
-            f"find {search_dir} -maxdepth 3 -type f "
-            f"-not -path '*/.venv/*' -not -path '*/__pycache__/*' 2>/dev/null",
+            f"find {search_dir} -maxdepth 3 -type f -not -path '*/.venv/*' -not -path '*/__pycache__/*' 2>/dev/null",
             timeout=30,
         )
         if exit_code == 0 and stdout:
@@ -319,6 +343,25 @@ def _read_skill_from_sandbox(sandbox: Sandbox, task_name: str) -> SkillBundle | 
     return SkillBundle(name=skill_name, skillell=skillell, scripts=scripts)
 
 
+def _build_available_skills(task: Task) -> dict[str, str]:
+    """Extract skill names and descriptions from pre-installed skills.
+
+    Parses SKILL.md YAML frontmatter for 'description' field.
+    Returns {skill_name: description} for AgentLoop's {skills_block}.
+    """
+    import re
+
+    skills: dict[str, str] = {}
+    for path, content in task.environment.pre_installed_skills.items():
+        if not path.endswith("SKILL.md"):
+            continue
+        name = path.split("/")[0]
+        desc_match = re.search(r"description:\s*(.+?)(?:\n|$)", content)
+        desc = desc_match.group(1).strip() if desc_match else "No description"
+        skills[name] = desc
+    return skills
+
+
 def _build_environment_context(task: Task) -> str:
     """Build a dense summary of the task's environment files and context.
 
@@ -330,10 +373,7 @@ def _build_environment_context(task: Task) -> str:
 
     env_dir = task.environment.root / "environment"
     if env_dir.exists():
-        root_files = sorted(
-            f for f in env_dir.iterdir()
-            if f.is_file() and f.name != "Dockerfile"
-        )
+        root_files = sorted(f for f in env_dir.iterdir() if f.is_file() and f.name != "Dockerfile")
         for f in root_files:
             try:
                 content = f.read_text()
@@ -342,19 +382,20 @@ def _build_environment_context(task: Task) -> str:
                 parts.append(f"### Input file: {f.name}  [binary, skipped]")
 
     if task.environment.data_files:
-        parts.append("### Data files in data/:")
+        parts.append("### Data files in data/ (also accessible via /data/):")
         for path, content in task.environment.data_files.items():
-            parts.append(f"**{path}**\n```\n{content[:3000]}\n```")
+            if content.startswith("__B64__"):
+                size = len(content) - 7  # strip __B64__ prefix
+                parts.append(f"**{path}**  [binary, ~{size} bytes base64 — use python3 to parse]")
+            else:
+                parts.append(f"**{path}**\n```\n{content[:2000]}\n```")
 
     if task.environment.doc_files:
         parts.append("### Reference documents:")
         for path, content in task.environment.doc_files.items():
             parts.append(f"**{path}**\n```\n{content[:3000]}\n```")
 
-    skill_mds = {
-        k: v for k, v in task.environment.pre_installed_skills.items()
-        if k.endswith("SKILL.md")
-    }
+    skill_mds = {k: v for k, v in task.environment.pre_installed_skills.items() if k.endswith("SKILL.md")}
     if skill_mds:
         parts.append("### Pre-installed skills available:")
         for path, content in skill_mds.items():
@@ -388,14 +429,11 @@ def _extract_deps_from_task(task: Task) -> list[str]:
         # Remove pip flags (--flag=val, --flag, -flag) before extracting package names
         # Split by space and filter out flag tokens to avoid stripping hyphens
         # from package names (e.g., -p in batman-package).
-        pkgs_str = ' '.join(
-            t for t in pkgs_str.split()
-            if not t.startswith('-')
-        )
+        pkgs_str = " ".join(t for t in pkgs_str.split() if not t.startswith("-"))
         for token in re.findall(r'(["\']?)([a-zA-Z_][\w\-\.]*)\1', pkgs_str):
             name = token[1]
             # Skip tokens that look like version numbers (pure digits, e.g. "81" from setuptools<81)
-            if re.match(r'^\d+(\.\d+)*$', name):
+            if re.match(r"^\d+(\.\d+)*$", name):
                 continue
             deps.append(name)
 
@@ -418,7 +456,9 @@ def _install_host_deps(deps: list[str]) -> None:
         logger.info("Installing %d host deps for Verifier: %s", len(deps), ", ".join(deps))
         result = subprocess.run(
             [sys.executable, "-m", "pip", "install", "-q", *deps],
-            capture_output=True, text=True, timeout=300,
+            capture_output=True,
+            text=True,
+            timeout=300,
         )
         if result.returncode != 0:
             logger.warning("Host dep install had issues: %s", result.stderr[:200])

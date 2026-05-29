@@ -6,23 +6,61 @@ Agent skills self-evolve through a co-evolutionary loop: a **Skill Generator** c
 
 > **Current config uses debug defaults (N=2, M=3). Override with `--n 5 --m 15` for paper-level budget.**
 
+## Prerequisites
+
+| Requirement | Notes |
+|---|---|
+| Python 3.8+ | `tomli` fallback for <3.11; 3.11+ recommended |
+| Docker | Container isolation for sandboxed execution. [Install Docker](https://docs.docker.com/engine/install/) |
+| opencode CLI | Agent harness for evolution. Install: `curl -fsSL https://opencode.ai/install.sh \| bash` |
+| API key | DeepSeek (default). Configure via opencode: edit `~/.local/share/opencode/auth.json` |
+
+## Installation
+
+```bash
+# 1. Install opencode CLI (agent harness)
+curl -fsSL https://opencode.ai/install.sh | bash
+opencode --version   # verify installation (>= 1.2.27)
+
+# 2. Create and activate virtual environment
+python3 -m venv .venv
+source .venv/bin/activate   # Linux/macOS
+# .venv\Scripts\activate    # Windows
+
+# 3. Install core dependencies
+pip install -e .
+
+# 4. Install LLM provider of your choice
+pip install -e ".[anthropic]"   # Claude
+pip install -e ".[openai]"      # GPT
+# DeepSeek uses openai package — included in core deps
+
+# 5. (Optional) Dev tools
+pip install -e ".[dev]"         # pytest, ruff
+
+# 6. Configure DeepSeek API key in opencode
+mkdir -p ~/.local/share/opencode
+cat > ~/.local/share/opencode/auth.json << 'AUTH'
+{
+  "deepseek": {
+    "type": "api",
+    "key": "sk-your-deepseek-api-key"
+  }
+}
+AUTH
+```
+
 ## Quick Start
 
 ```bash
-# 1. Activate environment
-source .venv/bin/activate
-
-# 2. Set your API key
-export DEEPSEEK_API_KEY=sk-xxx
-
-# 3. Run evolution on any task
-python scripts/evolve.py --tasks citation-check --model deepseek-v4-flash
+# Run evolution on a single task
+python3 scripts/evolve.py --tasks citation-check --n 1 --m 1
 
 # Override evolution budget (paper: N=5, M=15)
-python scripts/evolve.py --tasks exoplanet-detection-period --n 5 --m 15
+python3 scripts/evolve.py --tasks exoplanet-detection-period --n 5 --m 15
 
 # Run all 94 tasks (requires API quota)
-python scripts/evolve.py
+python3 scripts/evolve.py
 ```
 
 ## Available Tasks
@@ -188,23 +226,29 @@ All tasks can be run with `--tasks <name>`. The `--tasks` flag accepts a task na
 
 | Requirement | Notes |
 |---|---|
-| Python 3.8+ | `tomli` fallback for <3.11 |
+| Python 3.8+ | `tomli` fallback for <3.11; 3.11+ recommended |
+| Docker | Container isolation for sandboxed execution. [Install Docker](https://docs.docker.com/engine/install/) |
 | API key | Default provider: DeepSeek. Set env `DEEPSEEK_API_KEY`. Also supports Anthropic/OpenAI |
-| proot (auto) | Static binary downloaded on first run for path virtualization |
 
 ## Installation
 
 ```bash
-cd CoEvo
+# 1. Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate   # Linux/macOS
+# .venv\Scripts\activate    # Windows
 
-# Core dependencies
+# 2. Install core dependencies
 pip install -e .
 
-# With specific LLM provider
+# 3. Install LLM provider of your choice
 pip install -e ".[anthropic]"   # Claude
 pip install -e ".[openai]"      # GPT
+# DeepSeek uses OpenAI-compatible API — install openai client
+pip install openai
+
+# 4. (Optional) Dev tools
 pip install -e ".[dev]"         # pytest, ruff
-pip install -e ".[anthropic,openai,dev]"  # all at once
 ```
 
 ## Project Structure
@@ -213,7 +257,10 @@ pip install -e ".[anthropic,openai,dev]"  # all at once
 CoEvo/
 ├── utils/                    # Infrastructure
 │   ├── llm/                  #   LLM clients (Anthropic, OpenAI, DeepSeek)
-│   ├── agent/                #   Agent interaction loop (JSON protocol + prompts)
+│   ├── agent/                #   Agent harness (opencode CLI + legacy JSON protocol)
+│   │   ├── opencode_harness.py  #     opencode CLI agent harness (default)
+│   │   ├── loop.py              #     Legacy JSON-protocol AgentLoop
+│   │   └── prompts.py           #     System prompts
 │   ├── executor/             #   Sandbox, Executor Φ(S,E), environment
 │   ├── config.py             #   Configuration loading
 │   └── logger.py             #   Structured logging
@@ -275,15 +322,23 @@ python scripts/evolve.py --parallel 2
 
 **What happens:**
 1. Loads each SkillsBench task (instruction + environment).
-2. **Generator πθ** creates an initial skill bundle (SKILL.md + scripts/).
+2. **opencode CLI harness** receives an AGENTS.md with evolution workflow (P1-P6), available skills, environment context, and task instruction.
 3. Co-evolution loop (Algorithm 1):
-   - **Executor Φ(S,E)** runs the skill in a sandbox → output files.
+   - **opencode execution** in Docker sandbox: reads pre-installed skills, creates evo-* skill bundle, executes task → output files.
    - **Surrogate Verifier** generates tests, runs them against outputs.
-   - If tests fail → structured feedback → Generator refines the skill.
+   - If tests fail → structured feedback → opencode refines the skill (--session --continue).
    - If tests pass → **Oracle** re-executes in a fresh environment.
    - If Oracle fails → Verifier escalates its tests.
    - Repeat up to N=5 Oracle rounds, M=15 surrogate retries.
 4. Output: evolved skills + round-by-round metrics saved to `./output/`.
+
+The agent harness is configurable in `configs/default.yaml`:
+```yaml
+agent_harness: "opencode"     # "opencode" (default) | "agentloop" (legacy JSON protocol)
+opencode:
+  model: "deepseek/deepseek-v4-pro"
+```
+opencode uses its own provider configuration (`opencode providers list`).
 
 ### 2. Evaluation — Test Evolved Skills (Paper §4.2)
 
@@ -379,13 +434,13 @@ output/
 
 ## Sandbox
 
-| Backend | Description |
-|---|---|---|
-| `local` (default) | proot-based path virtualization. Auto-downloads static binary on first run. Maps `/app`, `/root`, `/tests`, `/logs` to temp workspace. No root needed. |
-| `bare` | Plain subprocess in temp dir (fallback if proot unavailable). No path virtualization. |
-| `docker` | Full container isolation via Docker SDK (requires docker-py + daemon). |
+Three backends, configured via `configs/default.yaml` → `sandbox.backend`:
 
-No manual setup — `Sandbox` auto-detects and downloads `proot` if needed.
+| Backend | Description |
+|---|---|
+| `docker` **(default)** | Full container isolation via Docker SDK. Spins up a `python:3.12-slim` container per task with volume mounts. Real `apt-get`/`curl` available inside. |
+| `local` | proot-based path virtualization. Auto-downloads static binary on first run. Maps `/app`, `/root`, `/tests`, `/logs` to temp workspace. No root needed. |
+| `bare` | Plain subprocess in temp dir (fallback if proot unavailable). No path virtualization. |
 
 ## Troubleshooting
 
@@ -394,14 +449,41 @@ No manual setup — `Sandbox` auto-detects and downloads `proot` if needed.
 pip install tomli pyyaml
 ```
 
-**Anthropic/OpenAI/DeepSeek client not connecting**
-- Verify API key is set: `echo $ANTHROPIC_API_KEY`
-- Check model name matches your API access tier
+**opencode: command not found**
+opencode CLI is not installed. Install from https://opencode.ai
+
+**opencode hangs / no output for >5 minutes**
+- opencode may be in plan mode analyzing the task — normal for complex tasks
+- Check: `ps aux | grep opencode` to verify it's still running (CPU > 0%)
+- If opencode hangs with 0% CPU for >5 min, the DeepSeek API may be rate-limited
+- Kill and retry: `pkill -f "opencode run"; pkill -f "evolve.py"`
+
+**DeepSeek API key not found**
+openCode's provider configuration is in `~/.local/share/opencode/auth.json`:
+```json
+{
+  "deepseek": {
+    "type": "api",
+    "key": "sk-your-deepseek-api-key"
+  }
+}
+```
+Verify: `cat ~/.local/share/opencode/auth.json`
+
+**Docker not available / daemon not running**
+```bash
+docker info   # check Docker daemon status
+```
+If Docker is unavailable, switch to local sandbox backend in `configs/default.yaml`:
+```yaml
+sandbox:
+  backend: "local"   # proot-based, no Docker needed
+```
 
 **Sandbox fails on a specific task**
-- proot auto-downloads on first run; check internet connectivity if it fails
+- Docker is the default backend; ensure Docker daemon is running (`docker ps`)
 - dependencies are auto-installed from the task's Dockerfile
-- if commands fail inside the sandbox, proot binary may need `PROOT_NO_SECCOMP=1` (already set)
+- for local backend: proot auto-downloads on first run; check internet connectivity if it fails
 
 **Context overflow (β exceeded)**
 - Increase `beta` in `configs/default.yaml` (max 1.0)

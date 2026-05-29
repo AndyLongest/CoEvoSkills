@@ -5,35 +5,71 @@ from pathlib import Path
 from collections.abc import Callable
 
 from repository.skill import SkillBundle
-from utils.agent.loop import AgentLoop
-from utils.agent.prompts import EVOLUTION_AGENT_SYSTEM_PROMPT
+from utils.agent.opencode_harness import EVOLUTION_AGENTS_MD, OpenCodeHarness, OpenCodeResult
 from utils.colors import C
 from utils.executor.sandbox import Sandbox
 from utils.llm.client import LLMClient
-from utils.llm.types import Message
 
 logger = logging.getLogger(__name__)
+
+
+def _build_agents_md(
+    instruction: str,
+    available_skills: dict[str, str] | None = None,
+    feedback: str | None = None,
+) -> str:
+    """Build AGENTS.md content with task instructions for opencode.
+
+    Only includes skill names+descriptions and the task instruction.
+    The agent explores the environment itself using read/glob/bash tools,
+    matching the paper's Claude-Code/Codex behavior.
+    """
+
+    parts = [EVOLUTION_AGENTS_MD]
+
+    if available_skills:
+        lines = [
+            "\n## Pre-installed Skills",
+            "",
+            "Read SKILL.md files in /app/environment/skills/ to load these:",
+            "",
+        ]
+        for name, desc in available_skills.items():
+            lines.append(f"- **{name}**: {desc}")
+            lines.append(f"  /app/environment/skills/{name}/SKILL.md")
+            lines.append("")
+        parts.extend(lines)
+
+    if feedback:
+        parts.append(f"## Previous Run Feedback\n\n{feedback}")
+        parts.append("Fix the skill to address these issues, then re-execute.")
+
+    parts.append(f"\n## Task\n\n{instruction}")
+
+    return "\n\n".join(parts)
 
 
 class SkillGenerator:
     """Skill Generator πθ (§3.3 Eq.7).
 
-    Uses an AgentLoop in the sandbox to generate, execute, and refine skill
-    bundles. The AgentLoop runs the EVOLUTION_AGENT_SYSTEM_PROMPT (P1-P6)
-    workflow — creating skills, executing them, and learning from terminal
-    output including import errors, API timeouts, and runtime failures.
+    Uses OpenCodeHarness (opencode CLI) as the execution engine.
+    The harness provides native tool calling, workspace awareness, session
+    management, and sub-agent delegation — matching Claude-Code/Codex
+    capabilities from the paper.
 
-    This unifies the Generator and Executor into a single AgentLoop session,
-    matching the paper's design where the Evolution Agent has full sandbox
-    access for both skill creation and execution.
+    AGENTS.md is written to the sandbox workspace before each run, providing
+    opencode with structured task instructions, available skills, environment
+    context, and progress tracking requirements.
     """
 
     def __init__(self, client: LLMClient, meta_skill: str = "", max_turns: int = 20):
         self.client = client
         self.meta_skill = meta_skill
         self.max_turns = max_turns
-        self._agent_loop: AgentLoop | None = None
+        self._harness: OpenCodeHarness | None = None
         self._skill_loader: Callable[[str], str | None] | None = None
+        self._workspace: Path | None = None
+        self._last_result: OpenCodeResult | None = None
 
     def set_skill_loader(self, loader: Callable[[str], str | None]) -> None:
         self._skill_loader = loader
@@ -42,97 +78,110 @@ class SkillGenerator:
         self,
         instruction: str,
         sandbox: Sandbox,
-        env_context: str = "",
-        installed_tools: str = "",
         feedback: str | None = None,
+        available_skills: dict[str, str] | None = None,
     ) -> tuple[SkillBundle | None, dict[str, str]]:
-        """Generate/refine skill and execute it in the sandbox.
+        """Generate/refine skill and execute via opencode harness.
 
-        Initial call creates the AgentLoop and produces S(0) + x(0).
-        Subsequent calls with feedback refine S in the existing conversation.
+        First call: writes AGENTS.md, runs opencode (new session).
+        Subsequent calls: runs opencode --continue (same session).
 
         Returns (skill_bundle, outputs) where outputs is {relative_path: content}.
         """
-        if self._agent_loop is None:
-            self._agent_loop = AgentLoop(
-                client=self.client,
-                sandbox=sandbox,
-                system_prompt=EVOLUTION_AGENT_SYSTEM_PROMPT,
+        if self._workspace is None and sandbox._workspace:
+            self._workspace = sandbox._workspace / "app"
+        if self._workspace is None:
+            raise RuntimeError("Sandbox workspace not available")
+
+        if self._harness is None:
+            self._harness = OpenCodeHarness(
+                model=_model_from_client(self.client),
                 max_turns=self.max_turns,
-                command_timeout=120,
+                timeout=3600,
             )
-            if self._skill_loader:
-                self._agent_loop.set_skill_loader(self._skill_loader)
-            self._agent_loop.init_context(
-                instruction,
-                meta_skill=self.meta_skill,
-                env_files=env_context,
-                installed_tools=installed_tools,
+            agents_md = _build_agents_md(
+                instruction=instruction,
+                available_skills=available_skills,
             )
-            print(f"  {C.cyan('GENERATOR')} | AgentLoop initialized")
+            print(f"  {C.cyan('GENERATOR')} | Writing AGENTS.md + starting opencode...")
+            result = self._harness.run(
+                instruction=instruction,
+                workspace=self._workspace,
+                system_prompt=agents_md,
+            )
+        else:
+            print(f"  {C.cyan('GENERATOR')} | Continuing opencode session...")
+            result = self._harness.run(
+                instruction=instruction,
+                workspace=self._workspace,
+                feedback=feedback,
+            )
 
-        if feedback:
-            self._agent_loop._messages.append(Message.user(
-                f"Host verifier found failures in the previous skill execution. "
-                f"Fix the evo-* skill to address these issues, then re-execute "
-                f"to produce output files. Here is the diagnostic:\n\n{feedback}"
-            ))
-            self._agent_loop._estimated_tokens += len(feedback) // 4
+        self._last_result = result
 
-        print(f"  {C.cyan('GENERATOR')} | Running AgentLoop (max {self.max_turns} turns)...")
-        self._agent_loop.run_loop(instruction)
+        print(
+            f"  {C.cyan('GENERATOR')} | opencode done: {result.turn_count} turns, "
+            f"completed={result.completed}, tokens={result.token_usage}"
+        )
 
-        # Collect outputs from sandbox
         outputs = _collect_outputs(sandbox)
-        print(f"  {C.cyan('GENERATOR')} | AgentLoop complete: {len(outputs)} files: {list(outputs.keys())[:5]}")
 
-        # Extract skill from sandbox
+        if result.outputs:
+            for relpath, content in result.outputs.items():
+                if relpath not in outputs:
+                    outputs[relpath] = content
+
+        print(f"  {C.cyan('GENERATOR')} | {len(outputs)} output files: {list(outputs.keys())[:5]}")
+
         skill = _read_skill_from_sandbox(sandbox)
         if skill:
-            print(f"  {C.cyan('GENERATOR')} | Skill '{skill.name}' found in sandbox")
+            print(f"  {C.cyan('GENERATOR')} | Skill '{skill.name}' found")
         else:
-            print(f"  {C.cyan('GENERATOR')} | No evo-* skill found in sandbox — using fallback")
+            print(f"  {C.cyan('GENERATOR')} | No evo-* skill found — fallback")
             skill = SkillBundle(name="evo-task", skillell="# Fallback skill\n")
 
         return skill, outputs
 
     def append_oracle_signal(self, score: float) -> None:
-        """Append oracle score to AgentLoop conversation context.
+        """Pass oracle binary pass/fail signal to generator context (Alg. 1 line 29).
 
-        score ∈ [0, 1]: fraction of ground-truth tests that passed.
-        Uses the score to give the agent directional feedback:
-          1.0   → "ALL TESTS PASSED. Converged."
-          0.75  → "9/12 tests passed (75.0%). The oracle detected issues."
-          0.0   → "ALL TESTS FAILED."
+        Paper: C ← C ⊕ 1[R(i)<1] — only the opaque binary bit, no score or test content.
+        This prevents the Generator from overfitting to the held-out ground-truth tests.
         """
-        if self._agent_loop is None:
-            return
-
         if score >= 1.0:
-            signal = "Ground-truth oracle: ALL TESTS PASSED. Converged."
-        elif score > 0.0:
-            # Try to reconstruct passed/total from score for a more informative signal
-            pct = score * 100
-            signal = (
-                f"Ground-truth oracle: {pct:.1f}% of tests passed. "
-                f"The oracle detected remaining issues — escalate and improve."
-            )
+            msg = "Ground-truth oracle: PASS."
         else:
-            signal = "Ground-truth oracle: ALL TESTS FAILED. Escalate and improve."
-
-        self._agent_loop._messages.append(Message.user(signal))
-        self._agent_loop._estimated_tokens += len(signal) // 4
+            msg = "Ground-truth oracle: FAIL. Escalate and improve."
+        logger.info("Oracle signal: %s", msg)
 
     def context_usage_ratio(self) -> float:
-        """Return estimated context window usage proportion."""
-        if self._agent_loop:
-            return self._agent_loop.context_usage_ratio()
         return 0.0
+
+    def get_turn_summary(self) -> str:
+        if self._last_result:
+            return (
+                f"OpenCodeHarness: {self._last_result.turn_count} turns, "
+                f"completed={self._last_result.completed}, "
+                f"tokens={self._last_result.token_usage}\n"
+                f"{self._last_result.summary[:500]}"
+            )
+        return "OpenCodeHarness: not yet executed"
 
     @property
     def persisted_context(self) -> bool:
-        """Whether the AgentLoop has been initialized (context persists)."""
-        return self._agent_loop is not None
+        return self._harness is not None and self._harness._session_id is not None
+
+
+def _model_from_client(client: LLMClient) -> str:
+    """Convert LLMClient model name to opencode provider/model format."""
+    model = getattr(client, "model", "deepseek-chat")
+    if "deepseek" in model:
+        return f"deepseek/{model}"
+    elif "gpt" in model or "openai" in model:
+        return f"openai/{model}"
+    elif "claude" in model or "anthropic" in model:
+        return f"anthropic/{model}"
+    return f"deepseek/{model}"
 
 
 def _collect_outputs(sandbox: Sandbox) -> dict[str, str]:
@@ -148,8 +197,6 @@ def _collect_outputs(sandbox: Sandbox) -> dict[str, str]:
                 abspath = line.strip()
                 if abspath and "progress.md" not in abspath:
                     content = sandbox.read_file(abspath)
-                    # Include file even if content is empty (e.g., binary xlsx)
-                    # as long as the file exists on disk.
                     if content is not None and (content or sandbox.file_exists(abspath)):
                         outputs[abspath.lstrip("/")] = content
     return outputs
@@ -179,9 +226,7 @@ def _read_skill_from_sandbox(sandbox: Sandbox) -> SkillBundle | None:
             break
 
     scripts_dir = str(Path(skillell_path).parent / "scripts")
-    ec2, out2, _ = sandbox.run(
-        f"find {scripts_dir} -type f -not -name '*.pyc' 2>/dev/null", timeout=5
-    )
+    ec2, out2, _ = sandbox.run(f"find {scripts_dir} -type f -not -name '*.pyc' 2>/dev/null", timeout=5)
     scripts: dict[str, str] = {}
     if ec2 == 0 and out2:
         for script_path in out2.strip().split("\n"):

@@ -1,0 +1,17 @@
+{
+  "agents": {
+    "coevo-evolution": {
+      "mode": "primary",
+      "permissions": [
+        {"permission": "question", "action": "deny", "pattern": "*"},
+        {"permission": "plan_enter", "action": "deny", "pattern": "*"},
+        {"permission": "plan_exit", "action": "deny", "pattern": "*"},
+        {"permission": "read", "pattern": "*.env", "action": "deny"},
+        {"permission": "read", "pattern": "*.env.*", "action": "deny"},
+        {"permission": "external_directory", "pattern": "/tmp/coevo_sandbox_*", "action": "allow"},
+        {"permission": "external_directory", "pattern": "*", "action": "deny"},
+        {"permission": "*", "action": "allow", "pattern": "*"}
+      ]
+    }
+  }
+}

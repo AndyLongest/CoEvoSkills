@@ -73,6 +73,20 @@ class SurrogateVerifier:
             F  — failure diagnostic if R̃ < 1, else None.
             test_suite — the test suite used (persisted for next round).
         """
+        if not outputs:
+            feedback = Feedback(
+                overall_pass=False,
+                surrogate_reward=0.0,
+                assertion_results=[],
+                root_cause_analysis="Agent produced zero output files. The skill execution completed but no files were written to /root/ or /app/. This may indicate the agent failed to run the skill, encountered errors during execution, or wrote files to unexpected locations.",
+                revision_suggestions=[
+                    "Verify the skill is executable and produces output files in /root/ or /app/.",
+                    "Check for runtime errors (import errors, file not found, logic bugs).",
+                    "Ensure the output format and location match the task instruction requirements.",
+                ],
+            )
+            return 0.0, feedback, test_suite or []
+
         if not test_suite:
             test_suite = self.test_generator.generate(instruction, outputs)
             logger.info("VERIFIER: generated %d tests:", len(test_suite))
@@ -81,8 +95,7 @@ class SurrogateVerifier:
             print(f"  {C.yellow('VERIFIER')}  | {len(test_suite)} tests generated")
 
         r_tilde, results = self.test_runner.run(test_suite, outputs)
-        logger.info("Test run: R̃=%.2f, %d/%d passed", r_tilde,
-                     sum(1 for r in results if r.passed), len(results))
+        logger.info("Test run: R̃=%.2f, %d/%d passed", r_tilde, sum(1 for r in results if r.passed), len(results))
 
         has_failure = any(not r.passed for r in results)
         if has_failure:
@@ -121,14 +134,10 @@ class SurrogateVerifier:
         and actionable revision suggestions.
         """
         failed = [r for r in results if not r.passed]
-        failed_summary = "\n".join(
-            f"- Test: {r.assertion[:120]}...\n  Error: {r.error}"
-            for r in failed
-        )
+        failed_summary = "\n".join(f"- Test: {r.assertion[:120]}...\n  Error: {r.error}" for r in failed)
 
         outputs_summary = "\n".join(
-            f"File: {path}\nContent:\n{content[:500]}\n"
-            for path, content in list(outputs.items())[:10]
+            f"File: {path}\nContent:\n{content[:500]}\n" for path, content in list(outputs.items())[:10]
         )
 
         prompt = f"""\

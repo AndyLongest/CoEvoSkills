@@ -52,8 +52,9 @@ def main():
     parser.add_argument("--parallel", default=None, type=int, help="Override parallel workers")
     parser.add_argument("--n", default=None, type=int, help="Override evolution N (max oracle interventions)")
     parser.add_argument("--m", default=None, type=int, help="Override evolution M (max surrogate retries)")
-    parser.add_argument("--partial-credit", action="store_true",
-                        help="Enable partial credit (Oracle returns passed/total ratio)")
+    parser.add_argument(
+        "--partial-credit", action="store_true", help="Enable partial credit (Oracle returns passed/total ratio)"
+    )
     args = parser.parse_args()
 
     logger = setup_logger("coevo-evolve")
@@ -105,6 +106,9 @@ def main():
             local_path = skill_dir / skill_name / "SKILL.md"
             if local_path.exists():
                 return local_path.read_text()
+            bench_path = args.benchmark / ".agents" / "skills" / skill_name / "SKILL.md"
+            if bench_path.exists():
+                return bench_path.read_text()
             return None
 
         _, metrics = run_evolution(

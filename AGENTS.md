@@ -94,9 +94,9 @@ scripts/evolve.py
 3. **Abstract LLM interface in `utils/llm/`**: enables hot-swapping Claude/GPT/open-source backends
 4. **Sandboxed executor in `utils/executor/`**: rollout Φ requires isolated Docker environments, independent of LLM
 5. **`eval/` separated from `engine/`**: evolution and evaluation are distinct phases, no circular deps
-6. **Generator πθ as AgentLoop (unified with Executor Φ)**: The SkillGenerator uses an AgentLoop with `EVOLUTION_AGENT_SYSTEM_PROMPT` (P1-P6 workflow). The Generator creates skills, executes them, and SEES the terminal output (including import errors, API timeouts, runtime failures) — matching the paper's unified Evolution Agent design. Previously, Generator was a single text-only LLM call and Executor was a separate AgentLoop; this split prevented the Generator from seeing execution failures. Oracle still uses an independent AgentLoop in a fresh environment (E′).
+6. **opencode CLI as agent harness** (replaces JSON-protocol AgentLoop): The SkillGenerator spawns opencode in the Docker workspace. opencode provides native tool calling (bash, read, write, edit, glob, grep, task), workspace awareness, session persistence for multi-round evolution, and sub-agent delegation. This matches the paper's use of Claude-Code/Codex as agent harnesses. Oracle uses an independent opencode session in a fresh sandbox (E′).
 7. **V persistence across evaluate calls**: `SurrogateVerifier.evaluate()` returns the test suite as its third return value so `engine/evolution.py` can persist it as `V`. This ensures V(j) is fixed across surrogate retry rounds (matching Alg. 1 line 18: "V(j) locked") and only grows via `escalate()` when R̃=1 ∧ R<1.
-8. **Environment context injected into Generator**: The Generator πθ receives a dense summary of task environment files (`test.bib`, reference docs, pre-installed skill SKILL.md, pip dependencies, installed tools). See `_build_environment_context()` in `engine/evolution.py`.
+8. **Environment context injected into Generator**: The Generator πθ receives a dense summary of task environment files (`test.bib`, reference docs, pre-installed skill SKILL.md, pip dependencies, installed tools). For opencode harness, this is written as AGENTS.md in the workspace. See `_build_environment_context()` and `_build_agents_md()` in `engine/evolution.py` and `layers/skill_generator/generator.py`.
 9. **Test runner namespace includes common modules**: `TestRunner._run_single_assertion()` injects `json`, `re`, `Path` into the exec namespace alongside `os` and `open`. The namespace is shared across all assertions in a single evaluate call. Both the generate and escalate prompts tell the LLM which modules are pre-available.
 10. **Verifier feedback constrained to visible evidence**: The `VERIFIER_SYSTEM_PROMPT` and `_generate_feedback()` prompt explicitly forbid speculating about invisible causes (file permissions, symlinks, sandbox, network). Root-cause analysis is limited to what can be directly observed from the test failures and output files.
 11. **Environment root files copied to sandbox**: `Environment` collects root-level input files (e.g., `test.bib`) into `root_files` and `prepare_sandbox()` copies them to `/root/` in the sandbox. Previously only `data/`, `doc/`, and `skills/` subdirectories were copied; files at the environment root were silently dropped, causing skills to fail with FileNotFoundError.
@@ -167,13 +167,13 @@ The full Algorithm 1 loop is operational:
 
 ### Verified ✅
 - hello-world converged to R=1 (both with unified AgentLoop and Generator+Executor split)
-- proot path virtualization with bind mounts (v5.3.0 static binary)
-- Oracle sandbox dependency installation
-- Agent JSON protocol parsing with clear error messages
-- Skill refinement loop (R̃ < 1 → feedback → regenerate)
-- V persistence across evaluate calls (generated tests no longer discarded)
+- Docker sandbox backend with container isolation
+- Oracle sandbox dependency installation (real apt-get/curl in Docker, stubs in local mode)
 - Environment context injection into Generator (test.bib, ref docs, skill info)
 - Test runner namespace includes common modules (json, re, Path) to prevent verifier assertion NameError
+- opencode CLI harness with session persistence for multi-round evolution
+- Checklist gate + β overflow check in evolution loop
+- /data mount pointing to /app/environment/data
 
 ### Not Yet Verified
 - Non-trivial task convergence (citation-check R̃=1 but Oracle R=0 — needs N>2)
@@ -183,32 +183,53 @@ The full Algorithm 1 loop is operational:
 
 ### Environment
 - Python: 3.11.15 venv (`source .venv/bin/activate`)
-- LLM: DeepSeek V4 Pro (default), API key in `DEEPSEEK_API_KEY`
-- Docker: NOT available on this machine
-- Sandbox: proot-based path virtualization (`utils/executor/proot` auto-downloaded on first run)
+- LLM: DeepSeek V4 Pro (default), API key in `DEEPSEEK_API_KEY` (configured via opencode)
+- Docker: available on this machine (v29.1.3, docker-py 7.1.0)
+- Sandbox: Docker container isolation (python:3.12-slim). Backend configurable via configs/default.yaml (sandbox.backend: "docker" | "local" | "bare")
+- Agent Harness: **opencode CLI** (v1.2.27) — replaces custom JSON-protocol AgentLoop
 - Config: `configs/default.yaml` (N=2, M=3 for debug; paper uses N=5, M=15)
 
 ## Sandbox Architecture
 
-Three backends, auto-detected:
+Three backends, configured via `configs/default.yaml` → `sandbox.backend`:
 
 ```
-Sandbox(backend="local")      # default
+Sandbox(backend="docker")     # default — full Docker container isolation
+  → creates container from python:3.12-slim
+  → multi-bind-mount: app, root, tests, logs, data
+  → real apt-get/curl available in container
+
+Sandbox(backend="local")      # proot-based path virtualization
   → _ensure_proot()           # auto-downloads proot static binary if missing
   → _run_local()              # proot -b bind-mount wraps subprocess
     proot -b {ws}/app:/app -b {ws}/root:/root ...
-    → absolute paths (/app/hello.txt) resolve to workspace
-    → read_file/write_file use same {ws}/path mapping → all layers aligned
 
 Sandbox(backend="bare")       # fallback, no path virtualization
   → plain subprocess in temp dir
-
-Sandbox(backend="docker")     # requires docker-py + daemon
-  → volume mount -v {ws}:/app
 ```
 
-proot provides filesystem path virtualization without root, matching Docker's volume mount semantics. All three layers (write_file/read_file, subprocess, verifier tests) see the same path namespace.
+## Agent Harness (opencode CLI)
 
-## Plan B: Docker Sandbox (future)
+The default agent harness is **opencode CLI** (v1.2.27). It replaces the custom JSON-protocol AgentLoop with opencode's native tool set.
 
-Once Docker is available, switch with `Sandbox(backend="docker", dockerfile=...)` for full isolation + reproducible builds.
+```
+SkillGenerator.generate_and_execute()
+  ├── Writes AGENTS.md to Docker workspace
+  │     ├── Evolution workflow (P1-P6)
+  │     ├── Available skills + descriptions
+  │     ├── Environment file tree + tools
+  │     └── Task instruction + feedback
+  └── Spawns opencode run --format json --dir <workspace>
+        ├── Native tools: bash, read, write, edit, glob, grep, task
+        ├── Sub-agent delegation: explore, general
+        ├── Workspace awareness: file.watcher
+        ├── Session persistence: --session / --continue
+        └── Returns JSON events → parse completion + collect outputs
+```
+
+Key advantages over the legacy AgentLoop:
+- No JSON protocol parsing failures (opencode uses native tool calls)
+- Built-in error recovery and workspace diff
+- Session continuity via --session/--continue
+- Sub-agent delegation matching Claude-Code's subtask decomposition
+- AGENTS.md as native system instructions

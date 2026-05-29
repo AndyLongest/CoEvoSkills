@@ -21,7 +21,7 @@ class Sandbox:
       - docker: Full Docker container isolation (requires docker-py + daemon)
     """
 
-    def __init__(self, image: str = "python:3.12-slim", backend: str = "local"):
+    def __init__(self, image: str = "python:3.12-slim", backend: str = "docker"):
         self.image = image
         self.backend = backend
         self._container: Any = None
@@ -48,14 +48,25 @@ class Sandbox:
         self._workspace = Path(tempfile.mkdtemp(prefix="coevo_sandbox_"))
         for subdir in ("app", "root", "tests", "logs"):
             (self._workspace / subdir).mkdir(parents=True, exist_ok=True)
+        (self._workspace / "app" / "environment" / "data").mkdir(parents=True, exist_ok=True)
 
     def _setup_docker(self) -> None:
         import docker
 
         client = docker.from_env()
-        volumes = {}
         self._workspace = Path(tempfile.mkdtemp(prefix="coevo_sandbox_"))
-        volumes[str(self._workspace)] = {"bind": "/app", "mode": "rw"}
+
+        for subdir in ("app", "root", "tests", "logs"):
+            (self._workspace / subdir).mkdir(parents=True, exist_ok=True)
+        (self._workspace / "app" / "environment" / "data").mkdir(parents=True, exist_ok=True)
+
+        volumes = {
+            str(self._workspace / "app"): {"bind": "/app", "mode": "rw"},
+            str(self._workspace / "root"): {"bind": "/root", "mode": "rw"},
+            str(self._workspace / "tests"): {"bind": "/tests", "mode": "rw"},
+            str(self._workspace / "logs"): {"bind": "/logs", "mode": "rw"},
+            str(self._workspace / "app" / "environment" / "data"): {"bind": "/data", "mode": "rw"},
+        }
         self._container = client.containers.run(
             self.image,
             "sleep infinity",
@@ -100,12 +111,21 @@ class Sandbox:
                 ws = str(self._workspace)
                 proot_cmd = [
                     str(proot_bin),
-                    "-b", f"{ws}/app:/app",
-                    "-b", f"{ws}/root:/root",
-                    "-b", f"{ws}/tests:/tests",
-                    "-b", f"{ws}/logs:/logs",
-                    "-w", cwd,
-                    "bash", "-c", command,
+                    "-b",
+                    f"{ws}/app:/app",
+                    "-b",
+                    f"{ws}/root:/root",
+                    "-b",
+                    f"{ws}/tests:/tests",
+                    "-b",
+                    f"{ws}/logs:/logs",
+                    "-b",
+                    f"{ws}/app/environment/data:/data",
+                    "-w",
+                    cwd,
+                    "bash",
+                    "-c",
+                    command,
                 ]
                 result = subprocess.run(
                     proot_cmd,
@@ -149,22 +169,35 @@ class Sandbox:
 
     def _run_docker(self, command: str, timeout: int, cwd: str) -> tuple[int, str, str]:
         try:
-            result = self._container.exec_run(
-                f"cd {cwd} && {command}",
-                demux=True,
+            result = subprocess.run(
+                ["docker", "exec", "-w", cwd, self._container.id, "bash", "-c", command],
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
             )
-            exit_code = result.exit_code or 0
-            stdout = result.output[0].decode() if result.output and result.output[0] else ""
-            stderr = result.output[1].decode() if result.output and len(result.output) > 1 and result.output[1] else ""
-            return exit_code, stdout, stderr
+            return result.returncode, result.stdout, result.stderr
+        except subprocess.TimeoutExpired:
+            return 124, "", f"Command timed out after {timeout}s"
         except Exception as e:
             return 1, "", str(e)
+
+    def _translate_path(self, path: str) -> str:
+        """Translate sandbox paths to workspace-relative paths.
+
+        /data is a Docker volume mount (or proot bind-mount) to /app/environment/data.
+        File I/O must go through the same physical location.
+        """
+        if path.startswith("/data/"):
+            return "/app/environment/data" + path[5:]
+        return path
 
     def write_file(self, path: str, content: str) -> None:
         if not self._initialized:
             self.setup()
 
-        full_path = self._workspace / path.lstrip("/")
+        translated = self._translate_path(path)
+        full_path = self._workspace / translated.lstrip("/")
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content)
 
@@ -172,7 +205,8 @@ class Sandbox:
         if not self._initialized:
             self.setup()
 
-        full_path = self._workspace / path.lstrip("/")
+        translated = self._translate_path(path)
+        full_path = self._workspace / translated.lstrip("/")
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_bytes(content)
 
@@ -180,7 +214,8 @@ class Sandbox:
         if not self._initialized:
             self.setup()
 
-        full_path = self._workspace / path.lstrip("/")
+        translated = self._translate_path(path)
+        full_path = self._workspace / translated.lstrip("/")
         if not full_path.exists():
             return ""
         try:
@@ -191,7 +226,8 @@ class Sandbox:
     def file_exists(self, path: str) -> bool:
         if not self._initialized or not self._workspace:
             return False
-        full_path = self._workspace / path.lstrip("/")
+        translated = self._translate_path(path)
+        full_path = self._workspace / translated.lstrip("/")
         return full_path.exists()
 
     def cleanup(self) -> None:

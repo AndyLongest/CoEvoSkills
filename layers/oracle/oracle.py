@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json as json_module
 import logging
+import subprocess
+from pathlib import Path
 
-from utils.agent.loop import AgentLoop
 from utils.agent.prompts import EXECUTE_ONLY_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -35,8 +36,8 @@ class Oracle:
     Steps:
       1. Create a fresh sandbox (separate from evolution sandbox).
       2. Prepare environment + install skill.
-      3. Run AgentLoop to produce outputs.
-      4. Run ground-truth test suite.
+       3. Run opencode agent to produce outputs.
+       4. Run ground-truth test suite.
       5. Read reward.
     """
 
@@ -48,10 +49,12 @@ class Oracle:
         deps: list[str] | None = None,
         timeout: int = 3600,
         partial_credit: bool = False,
+        sandbox_backend: str = "docker",
+        sandbox_image: str = "python:3.12-slim",
     ) -> tuple[int, float]:
         from utils.executor.sandbox import Sandbox
 
-        sandbox = Sandbox()
+        sandbox = Sandbox(backend=sandbox_backend, image=sandbox_image)
         sandbox.setup(install_deps=deps)
 
         try:
@@ -59,11 +62,8 @@ class Oracle:
             env.prepare_sandbox(sandbox)
             env.install_skill(sandbox, skill.name, skill)
 
-            # Run agent to produce outputs
-            prompt = EXECUTE_ONLY_SYSTEM_PROMPT.replace("{skill_name}", skill.name)
-            agent = AgentLoop(client=client, sandbox=sandbox, system_prompt=prompt, max_turns=10)
-            agent.init_context(task.instruction)
-            agent.run_loop(task.instruction)
+            # Run opencode to produce outputs using the installed skill
+            self._run_agent(sandbox, task, skill)
 
             # Run ground-truth tests
             self._run_verifier_tests(sandbox, task, timeout)
@@ -79,37 +79,99 @@ class Oracle:
             sandbox.cleanup()
             return 0, 0.0
 
-    def _run_verifier_tests(self, sandbox, task, timeout: int) -> None:
-        """Run ground-truth test suite in the sandbox.
+    def _run_agent(self, sandbox, task, skill) -> None:
+        """Run opencode in the Oracle sandbox using the installed skill.
 
-        test.sh assumes Docker (apt-get, curl, uv). We stub those out
-        and let the script run as-is — the core test logic (pytest, python3)
-        works fine without root.
+        Creates a fresh opencode session in the isolated sandbox workspace.
+        The agent executes the task using the pre-installed evo-* skill.
+        Matches the paper's independent agent harness (Claude-Code/Codex)
+        in a fresh environment E'.
         """
+        workspace = sandbox._workspace / "app" if sandbox._workspace else None
+        if workspace is None:
+            logger.error("Oracle: no sandbox workspace, skipping agent execution")
+            return
+
+        agents_md = f"""\
+# CoEvoSkills Oracle Agent
+
+You execute tasks using pre-installed skills in an isolated sandbox.
+
+## Task
+{task.instruction}
+
+## Available Skill
+The skill '{skill.name}' is pre-installed at /app/environment/skills/{skill.name}/.
+- Read /app/environment/skills/{skill.name}/SKILL.md for the skill documentation.
+- Import skill functions:
+    import sys; sys.path.insert(0, '/app/environment/skills/{skill.name}/scripts')
+    from utils import function_name
+- Write /root/run.py that imports and uses the skill functions.
+- Run: python3 /root/run.py
+- Output files go to /root/.
+
+## Rules
+- No sudo.
+- Read available skills before executing.
+- Input data is at /app/environment/data/ and /data/.
+"""
+
+        agents_path = workspace / "AGENTS.md"
+        agents_path.parent.mkdir(parents=True, exist_ok=True)
+        agents_path.write_text(agents_md)
+
+        try:
+            subprocess.run(
+                [
+                    "opencode",
+                    "run",
+                    task.instruction,
+                    "--model",
+                    "deepseek/deepseek-v4-pro",
+                    "--agent",
+                    "coevo-evolution",
+                    "--dir",
+                    str(workspace),
+                    "--format",
+                    "json",
+                ],
+                check=False,
+                timeout=600,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("Oracle: opencode timed out")
+        except Exception as e:
+            logger.warning("Oracle: opencode error: %s", e)
+
+    def _run_verifier_tests(self, sandbox, task, timeout: int) -> None:
+        """Run ground-truth test suite in the sandbox."""
         test_dir = task.verifier_path.parent
         if not test_dir.exists():
             return
 
-        # Copy test files into sandbox
         for test_file in test_dir.iterdir():
             if test_file.is_file():
                 content = test_file.read_text()
                 sandbox.write_file(f"/tests/{test_file.name}", content)
 
-        # Sync files between /root/ and /app/ so tests find outputs either way
         sandbox.run("cp -rn /root/* /app/ 2>/dev/null; cp -rn /app/* /root/ 2>/dev/null", timeout=5)
 
-        # Create stub scripts to shadow apt-get and curl (Docker-only commands)
-        sandbox.write_file("/root/bin/apt-get", _STUB_APT)
-        sandbox.write_file("/root/bin/apt", _STUB_APT)
-        sandbox.write_file("/root/bin/curl", _STUB_CURL)
-        sandbox.run("chmod +x /root/bin/apt-get /root/bin/apt /root/bin/curl", timeout=5)
-
-        # Run test.sh with stubs on PATH
-        sandbox.run(
-            "export PATH=/root/bin:$PATH && bash /tests/test.sh 2>&1",
-            timeout=min(timeout, 600),
-        )
+        if sandbox.backend != "docker":
+            sandbox.write_file("/root/bin/apt-get", _STUB_APT)
+            sandbox.write_file("/root/bin/apt", _STUB_APT)
+            sandbox.write_file("/root/bin/curl", _STUB_CURL)
+            sandbox.run("chmod +x /root/bin/apt-get /root/bin/apt /root/bin/curl", timeout=5)
+            sandbox.run(
+                "export PATH=/root/bin:$PATH && bash /tests/test.sh 2>&1",
+                timeout=min(timeout, 600),
+            )
+        else:
+            sandbox.run(
+                "bash /tests/test.sh 2>&1",
+                timeout=min(timeout, 600),
+            )
 
     def _read_reward(self, sandbox) -> int:
         """Read binary reward from reward.txt."""
@@ -141,41 +203,3 @@ class Oracle:
         except (json_module.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logger.warning("ORACLE: failed to parse CTRF report: %s, falling back to binary reward", e)
             return float(self._read_reward(sandbox))
-
-    def _run_verifier_tests(self, sandbox, task, timeout: int) -> int:
-        """Run ground-truth test suite in the sandbox.
-
-        test.sh assumes Docker (apt-get, curl, uv). We stub those out
-        and let the script run as-is — the core test logic (pytest, python3)
-        works fine without root.
-        """
-        test_dir = task.verifier_path.parent
-        if not test_dir.exists():
-            return 0
-
-        # Copy test files into sandbox
-        for test_file in test_dir.iterdir():
-            if test_file.is_file():
-                content = test_file.read_text()
-                sandbox.write_file(f"/tests/{test_file.name}", content)
-
-        # Sync files between /root/ and /app/ so tests find outputs either way
-        sandbox.run("cp -rn /root/* /app/ 2>/dev/null; cp -rn /app/* /root/ 2>/dev/null", timeout=5)
-
-        # Create stub scripts to shadow apt-get and curl (Docker-only commands)
-        sandbox.write_file("/root/bin/apt-get", _STUB_APT)
-        sandbox.write_file("/root/bin/apt", _STUB_APT)
-        sandbox.write_file("/root/bin/curl", _STUB_CURL)
-        sandbox.run("chmod +x /root/bin/apt-get /root/bin/apt /root/bin/curl", timeout=5)
-
-        # Run test.sh with stubs on PATH
-        ec, stdout, stderr = sandbox.run(
-            "export PATH=/root/bin:$PATH && bash /tests/test.sh 2>&1",
-            timeout=min(timeout, 600),
-        )
-
-        reward_text = sandbox.read_file("/logs/verifier/reward.txt").strip()
-        try:
-            return int(float(reward_text))
-        except (ValueError, TypeError):
-            return 0

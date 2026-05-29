@@ -2,8 +2,8 @@
 # See paper §4.1, Table A1 for parameter descriptions
 
 evolution:
-  n: 2       # max oracle interventions (debug - paper uses 5)
-  m: 3       # max surrogate retries (debug - paper uses 15)
+  n: 5       # max oracle interventions (paper uses 5)
+  m: 15      # max surrogate retries (paper uses 15)
   beta: 0.7  # context usage cap
 
 timeout:
@@ -21,6 +21,14 @@ oracle:
 # LLM model selection (overridable via CLI)
 llm_model: "deepseek-v4-pro"
 verifier_model: null  # defaults to same as llm_model
+
+sandbox:
+  backend: "docker"   # "docker" | "local" (proot) | "bare" (no virtualization)
+  image: "python:3.12-slim"
+
+agent_harness: "opencode"   # "opencode" (CLI harness) | "agentloop" (JSON protocol, legacy)
+opencode:
+    model: "deepseek/deepseek-v4-flash"   # opencode provider/model format
 
 # Paths
 skillsbench_path: "./skillsbench"
